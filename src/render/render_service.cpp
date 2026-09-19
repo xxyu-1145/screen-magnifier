@@ -747,23 +747,23 @@ struct RenderService::Impl {
         const RectPx dest = vp_mapping.dest_rect_px;
         if (is_empty(visible_src) || is_empty(dest)) return;
 
-        // Where the selection shape lands in client space. The viewport may show
-        // desktop outside the selection, and the mask has to cover that too --
-        // otherwise a rectangle selection would leave its own window transparent
-        // around the edges -- so it is grown to the client rect around the
-        // selection's centre. A window smaller than the selection keeps the
-        // selection's own extent, which is what makes it crop rather than clip
-        // the shape: a circle stays a circle and the window is simply inside it.
+        // The mask is the window itself: the shape is the aperture the user
+        // looks through, and the desktop shows through it.
+        //
+        // It used to be the selection's own extent, grown to the window when
+        // the window was the larger of the two. That reads well until the
+        // window is made smaller than the shape: the mask then stays the
+        // selection's size and the window becomes a crop of the shape's middle,
+        // so a circle -- whose middle is all circle -- fills the whole
+        // rectangle and the window is a rectangle again. Handing the mask the
+        // window's own extent keeps the circle a circle at every size: the
+        // aperture shrinks with the window instead of being cropped by it.
+        //
+        // The selection still decides where the view is centred and how big the
+        // window starts (fit to source), and its shape kind and corner radius
+        // are what the mask is drawn from.
         const Q16 scale = vp_mapping.applied_scale_q16;
-        const Px sel_w = scale_px(width_of(sel), scale);
-        const Px sel_h = scale_px(height_of(sel), scale);
-        const Px sel_left = dest.left - scale_px(vp_mapping.src_sub_rect_px.left, scale);
-        const Px sel_top = dest.top - scale_px(vp_mapping.src_sub_rect_px.top, scale);
-        const Px mask_w = std::max<Px>(sel_w, width_of(dest));
-        const Px mask_h = std::max<Px>(sel_h, height_of(dest));
-        const Px mask_left = sel_left + sel_w / 2 - mask_w / 2;
-        const Px mask_top = sel_top + sel_h / 2 - mask_h / 2;
-        const RectPx mask_rect{mask_left, mask_top, mask_left + mask_w, mask_top + mask_h};
+        const RectPx mask_rect = dest;
 
         bool bicubic = false;
         ID3D11PixelShader* ps = pick_pixel_shader(snap.magnification.factor_q16, bicubic);

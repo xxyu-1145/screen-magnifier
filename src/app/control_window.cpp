@@ -593,6 +593,15 @@ LRESULT CALLBACK chord_edit_subclass(HWND hwnd, UINT message, WPARAM wparam, LPA
         case WM_SYSKEYDOWN:
             self->handle_chord_key(static_cast<UINT>(wparam));
             return 0;
+        // The mouse buttons cannot be registered with the system at all, so
+        // they are bound the same way they are pressed: while the field is
+        // armed and the cursor is over it. The left button is deliberately not
+        // among them -- clicking the field is what arms it.
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+            self->handle_chord_mouse_button(message, wparam);
+            return 0;
         case WM_CHAR:
         case WM_SYSCHAR:
             return 0;
@@ -1836,6 +1845,41 @@ void ControlWindow::handle_chord_key(UINT vk) {
         }
         return;
     }
+
+    commit_captured_chord(vk);
+}
+
+void ControlWindow::handle_chord_mouse_button(UINT message, WPARAM wparam) {
+    if (chord_capture_index_ < 0) return;
+
+    // A mouse button is allowed on its own, unlike a letter: nothing else uses
+    // a side button, and "Ctrl + the back button" is not the gesture anyone
+    // reaches for. It does mean the button belongs to the program while it is
+    // bound -- see InputThread::ll_mouse_proc.
+    switch (message) {
+        case WM_RBUTTONDOWN:
+            commit_captured_chord(VK_RBUTTON);
+            return;
+        case WM_MBUTTONDOWN:
+            commit_captured_chord(VK_MBUTTON);
+            return;
+        case WM_XBUTTONDOWN:
+            if (HIWORD(wparam) == XBUTTON1) {
+                commit_captured_chord(VK_XBUTTON1);
+            } else if (HIWORD(wparam) == XBUTTON2) {
+                commit_captured_chord(VK_XBUTTON2);
+            }
+            return;
+        default:
+            return;
+    }
+}
+
+void ControlWindow::commit_captured_chord(UINT vk) {
+    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool win = ((GetKeyState(VK_LWIN) | GetKeyState(VK_RWIN)) & 0x8000) != 0;
 
     HotkeyChord chord{};
     if (ctrl) chord.modifiers |= 0x0002;   // MOD_CONTROL

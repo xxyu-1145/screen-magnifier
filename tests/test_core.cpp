@@ -861,6 +861,83 @@ void test_viewport() {
     CHECK(!mag::compute_viewport(empty_sel, cfg).valid);
 }
 
+// ---------------------------------------------------------------------------
+// §3.3 hotkey text: describe and parse are inverses, for every chord
+// ---------------------------------------------------------------------------
+
+void test_hotkey_text() {
+    // Every shipped chord has to survive a round trip through its own text:
+    // the field shows what describe_chord() says, and the file it writes is
+    // that same text, so a name that cannot be parsed back is a hotkey that
+    // disappears on the next load.
+    const mag::AppConfig defaults = mag::AppConfig::defaults();
+    for (std::size_t i = 0; i < static_cast<std::size_t>(mag::HotkeyAction::Count); ++i) {
+        const mag::HotkeyChord& chord = defaults.hotkeys[i];
+        CHECK(mag::chord_is_bound(chord));
+        const std::string text = mag::describe_chord(chord);
+        mag::HotkeyChord back{};
+        CHECK(mag::parse_chord(text, back));
+        CHECK(back == chord);
+        CHECK(!mag::chord_is_mouse_button(chord));
+    }
+
+    // An unbound chord has no text, and the empty string parses back to it.
+    CHECK(mag::describe_chord(mag::HotkeyChord{}).empty());
+    mag::HotkeyChord unbound{1, 2};
+    CHECK(mag::parse_chord("", unbound));
+    CHECK(!mag::chord_is_bound(unbound));
+
+    // The mouse buttons: what the capture stores, what the field shows, and
+    // what a hand-edited file may call them.
+    struct MouseName {
+        const char* text;
+        std::uint32_t vk;
+    };
+    const MouseName names[] = {
+        {"MouseRight", 0x02}, {"MouseMiddle", 0x04}, {"Mouse4", 0x05}, {"Mouse5", 0x06},
+        {"MouseBack", 0x05},  {"MouseForward", 0x06}, {"XButton1", 0x05}, {"XButton2", 0x06},
+        {"MMB", 0x04},        {"RMB", 0x02},
+    };
+    for (const MouseName& entry : names) {
+        mag::HotkeyChord chord{};
+        CHECK(mag::parse_chord(entry.text, chord));
+        CHECK(chord.virtual_key == entry.vk);
+        CHECK(chord.modifiers == 0);
+        CHECK(mag::chord_is_bound(chord));
+        CHECK(mag::chord_is_mouse_button(chord));
+        // And back out again, under the canonical name.
+        const std::string canonical = mag::describe_chord(chord);
+        CHECK(!canonical.empty());
+        mag::HotkeyChord again{};
+        CHECK(mag::parse_chord(canonical, again));
+        CHECK(again == chord);
+    }
+    CHECK(mag::describe_chord(mag::HotkeyChord{0, 0x05}) == "Mouse4");
+    CHECK(mag::describe_chord(mag::HotkeyChord{0, 0x06}) == "Mouse5");
+    CHECK(mag::describe_chord(mag::HotkeyChord{0, 0x04}) == "MouseMiddle");
+    CHECK(mag::describe_chord(mag::HotkeyChord{1, 0x05}) == "Alt+Mouse4");
+
+    // The keyboard is not the mouse, and a key that shares a number with a
+    // mouse button must not be read as one.
+    CHECK(!mag::is_mouse_button_vk(0x00));
+    CHECK(!mag::is_mouse_button_vk(0x08));   // Backspace
+    CHECK(!mag::is_mouse_button_vk('M'));
+    for (std::uint32_t vk = 0x07; vk <= 0xFF; ++vk) {
+        CHECK(!mag::is_mouse_button_vk(vk));
+    }
+
+    // A mouse chord survives the configuration file too: it is written as a
+    // number pair and read back as itself.
+    mag::AppConfig cfg = mag::AppConfig::defaults();
+    cfg.hotkeys[static_cast<std::size_t>(mag::HotkeyAction::CycleShape)] =
+        mag::HotkeyChord{0, 0x05};
+    mag::AppConfig back = mag::AppConfig::defaults();
+    CHECK(mag::from_json(mag::to_json(cfg), back));
+    CHECK(back.hotkeys[static_cast<std::size_t>(mag::HotkeyAction::CycleShape)] ==
+          (mag::HotkeyChord{0, 0x05}));
+    CHECK(mag::to_json(cfg).find("Mouse4") == std::string::npos);  // numbers, not names
+}
+
 }  // namespace
 
 int main() {
@@ -875,6 +952,7 @@ int main() {
     test_random_round_trips();
     test_magnification_controller();
     test_viewport();
+    test_hotkey_text();
     test_selection_slots();
     test_interaction_state_machine();
 

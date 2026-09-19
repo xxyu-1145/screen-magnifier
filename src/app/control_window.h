@@ -87,6 +87,11 @@ public:
     void begin_chord_capture(HWND edit);
     void cancel_chord_capture();
     void handle_chord_key(UINT virtual_key);
+    // A mouse button pressed while a field is waiting. The buttons the system
+    // charges nothing for -- right, middle and the two side buttons -- are
+    // bindable; the left button is how the field is clicked into, so binding it
+    // would make the arming gesture start the capture instead of ending it.
+    void handle_chord_mouse_button(UINT message, WPARAM wparam);
     bool capturing_chord() const noexcept { return chord_capture_index_ >= 0; }
 
     // Reads the factor box, clamps it into the legal range and applies it.
@@ -117,6 +122,10 @@ private:
     void refresh_preset_labels();
     void refresh_filter_labels();
     void on_command(int control_id, int notify_code);
+    // Stores the chord a capture ended on, with whatever modifiers are held,
+    // and hands it to the rebind callback. Shared by the keyboard path and the
+    // mouse one so the two cannot drift apart.
+    void commit_captured_chord(UINT virtual_key);
     // Reads the width/height boxes, clamps them and reports the result.
     void commit_size_edits();
     // Turns a size-slider position into an output size and reports it.

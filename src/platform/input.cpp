@@ -96,6 +96,30 @@ bool chord_modifiers_match(std::uint32_t mask) noexcept {
            have_win == want_win;
 }
 
+// The action bound to this key or button, when the fallback table holds a chord
+// that matches it right now. Only the chords RegisterHotKey could not have live
+// here -- the ones another application owns, and every mouse button -- so a
+// match means a hook is the only path that will see this event.
+std::optional<HotkeyAction> match_fallback_chord(std::uint32_t vk) noexcept {
+    if (g_ll_chord_count == 0) return std::nullopt;
+    for (std::size_t i = 0; i < g_ll_chord_count; ++i) {
+        const HotkeyChord& chord = g_ll_chords[i];
+        if (chord.virtual_key != vk) continue;
+        if (!chord_modifiers_match(chord.modifiers)) continue;
+        return g_ll_actions[i];
+    }
+    return std::nullopt;
+}
+
+// True when any of the fallback chords is a mouse button, which is what decides
+// whether the mouse hook is worth installing.
+bool fallback_has_mouse_chord() noexcept {
+    for (std::size_t i = 0; i < g_ll_chord_count; ++i) {
+        if (is_mouse_button_vk(g_ll_chords[i].virtual_key)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 InputThread* InputThread::ll_owner_ = nullptr;
@@ -268,12 +292,32 @@ void InputThread::register_all(const std::array<HotkeyChord, kHotkeyCount>& chor
         if (!chord_is_bound(chord)) continue;
         const auto action = static_cast<HotkeyAction>(i);
 
-        if (RegisterHotKey(nullptr, hotkey_id_for(i), chord.modifiers | MOD_NOREPEAT,
-                           chord.virtual_key) != FALSE) {
+        // A mouse button never goes to RegisterHotKey, and not because it would
+        // refuse: it *accepts* a mouse virtual key and reports success, and the
+        // system then never delivers one as a hotkey. Asking would produce a
+        // chord that looks registered and does nothing at all, which is the one
+        // failure this whole path exists to prevent. The hook is the only place
+        // a mouse button can be served, so that is where it goes.
+        //
+        // The left button is the exception, and it is refused outright: serving
+        // it would mean swallowing every click in the session, including the
+        // ones that would take the binding back. Nothing in the interface can
+        // make such a chord -- a left click on a chord field is what starts the
+        // capture -- so this only ever fires for a hand-edited file.
+        const bool mouse = is_mouse_button_vk(chord.virtual_key);
+        if (chord.virtual_key == VK_LBUTTON) {
+            report += describe_chord(chord);
+            report += " (";
+            report += hotkey_action_name(action);
+            report += ") refused: the left button cannot be bound\n";
+            continue;
+        }
+        if (!mouse && RegisterHotKey(nullptr, hotkey_id_for(i), chord.modifiers | MOD_NOREPEAT,
+                                     chord.virtual_key) != FALSE) {
             accepted.push_back(action);
             continue;
         }
-        const DWORD error = GetLastError();
+        const DWORD error = mouse ? 0u : GetLastError();
         out_conflicts.push_back(action);
         // A chord RegisterHotKey refused is exactly what the low-level fallback
         // is for. Only those chords go into the hook table: a chord both paths
@@ -288,7 +332,9 @@ void InputThread::register_all(const std::array<HotkeyChord, kHotkeyCount>& chor
         report += " (";
         report += hotkey_action_name(action);
         report += ") ";
-        if (error == ERROR_HOTKEY_ALREADY_REGISTERED) {
+        if (mouse) {
+            report += "is a mouse button, which only the low-level hook can serve";
+        } else if (error == ERROR_HOTKEY_ALREADY_REGISTERED) {
             report += "is already registered by another application";
         } else {
             report += "failed to register, error ";
@@ -322,13 +368,35 @@ bool InputThread::apply_low_level(bool enabled) {
             ll_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, &InputThread::ll_keyboard_proc,
                                          GetModuleHandleW(nullptr), 0);
         }
-        ll_enabled_.store(ll_hook_ != nullptr);
-        return ll_hook_ != nullptr;
+        if (ll_mouse_hook_ == nullptr && fallback_has_mouse_chord()) {
+            // Mouse buttons are only ever reachable this way: RegisterHotKey
+            // has no mouse chords at all, so a binding on one of them lives or
+            // dies with this hook. It is installed only when a chord actually
+            // needs it, because every mouse event in the session -- moves
+            // included, hundreds a second -- costs a trip to this thread while
+            // it is up, and a chord another application owns on the *keyboard*
+            // does not need the mouse hook at all.
+            ll_mouse_hook_ = SetWindowsHookExW(WH_MOUSE_LL, &InputThread::ll_mouse_proc,
+                                               GetModuleHandleW(nullptr), 0);
+        }
+        const bool ready = ll_hook_ != nullptr &&
+                           (ll_mouse_hook_ != nullptr || !fallback_has_mouse_chord());
+        ll_enabled_.store(ready);
+        if (!ready) {
+            // Half a hook is worse than none: the chords would report as served
+            // while one class of them silently did nothing.
+            apply_low_level(false);
+        }
+        return ready;
     }
     ll_enabled_.store(false);
     if (ll_hook_ != nullptr) {
         UnhookWindowsHookEx(ll_hook_);
         ll_hook_ = nullptr;
+    }
+    if (ll_mouse_hook_ != nullptr) {
+        UnhookWindowsHookEx(ll_mouse_hook_);
+        ll_mouse_hook_ = nullptr;
     }
     return true;
 }
@@ -539,16 +607,45 @@ LRESULT CALLBACK InputThread::ll_keyboard_proc(int code, WPARAM wparam, LPARAM l
     if (code == HC_ACTION && self != nullptr &&
         self->ll_enabled_.load(std::memory_order_relaxed)) {
         const DWORD event = static_cast<DWORD>(wparam);
-        if ((event == WM_KEYDOWN || event == WM_SYSKEYDOWN) && g_ll_chord_count != 0) {
+        if (event == WM_KEYDOWN || event == WM_SYSKEYDOWN) {
             const auto* info = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
-            for (std::size_t i = 0; i < g_ll_chord_count; ++i) {
-                const HotkeyChord& chord = g_ll_chords[i];
-                if (info->vkCode != chord.virtual_key) continue;
-                if (!chord_modifiers_match(chord.modifiers)) continue;
-                const auto action = g_ll_actions[i];
-                publish_payload(self->bus_, HotkeyPressed{static_cast<std::uint32_t>(action)});
+            if (const std::optional<HotkeyAction> action = match_fallback_chord(info->vkCode)) {
+                publish_payload(self->bus_, HotkeyPressed{static_cast<std::uint32_t>(*action)});
                 // A nonzero return is what swallows the keystroke: the system
                 // stops the chain and no window receives it.
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+LRESULT CALLBACK InputThread::ll_mouse_proc(int code, WPARAM wparam, LPARAM lparam) {
+    InputThread* self = ll_owner_;
+    if (code == HC_ACTION && self != nullptr &&
+        self->ll_enabled_.load(std::memory_order_relaxed)) {
+        std::uint32_t vk = 0;
+        switch (wparam) {
+            case WM_LBUTTONDOWN: vk = VK_LBUTTON; break;
+            case WM_RBUTTONDOWN: vk = VK_RBUTTON; break;
+            case WM_MBUTTONDOWN: vk = VK_MBUTTON; break;
+            case WM_XBUTTONDOWN: {
+                const auto* info = reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam);
+                vk = (HIWORD(info->mouseData) == XBUTTON1) ? VK_XBUTTON1 : VK_XBUTTON2;
+                break;
+            }
+            default:
+                // Moves, wheels, ups: nothing here is bindable, and this runs
+                // for every one of them.
+                break;
+        }
+        if (vk != 0) {
+            if (const std::optional<HotkeyAction> action = match_fallback_chord(vk)) {
+                publish_payload(self->bus_, HotkeyPressed{static_cast<std::uint32_t>(*action)});
+                // Swallowed, the same rule the keyboard path follows: a chord
+                // the program services does not also reach the window under the
+                // cursor. Binding the middle button therefore stops middle-drag
+                // everywhere, which is what binding it asked for.
                 return 1;
             }
         }

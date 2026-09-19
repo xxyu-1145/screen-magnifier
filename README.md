@@ -27,7 +27,9 @@ slider, and made to ignore the mouse entirely.*
 * **Everything is rebindable**, and a chord another application already owns is taken over rather
   than silently dropped. A chord *this* program already owns can be reassigned too: its own
   registrations are released while a chord field is waiting, so pressing `Ctrl+Alt+M` to give that
-  chord to something else types it into the field instead of toggling the magnifier.
+  chord to something else types it into the field instead of toggling the magnifier. **Mouse
+  buttons count** — the right, middle and both side buttons can be bound, on their own or with
+  modifiers.
 * **Keep four regions.** Frame the minimap once, frame the status bar once, switch between them with
   a click instead of re-dragging.
 * **Set the four preset factors** by typing them, and jump to them from the keyboard.
@@ -55,6 +57,22 @@ other program, so a bare letter is refused and the field says so, while the func
 allowed on their own because that is what people expect of them. A key the system takes before any
 window sees it — `PrintScreen`, the media and volume keys — cannot be captured by the field and
 will not appear there.
+
+#### Mouse buttons
+
+Click a field and press a mouse button. The right, middle and both side buttons can be bound, alone
+or with `Ctrl`/`Alt`/`Shift`/`Win`; the left button cannot, because clicking the field with it is
+what starts the capture. Two things are worth knowing:
+
+* A bound mouse button is **taken over**, exactly as a keyboard chord is: it stops reaching the
+  window under the cursor. Binding the middle button stops middle-drag everywhere. The system
+  cannot register a mouse chord at all — `RegisterHotKey` accepts one and then never delivers it —
+  so these bindings are served by the low-level mouse hook, which is also the only thing that can
+  see a side button outside the window under the cursor. Strict compatibility mode turns that hook
+  off, and the status line says so.
+* The hook is installed **only while a mouse-button binding exists**. It costs every mouse event in
+  the session a trip to the program's input thread, so it is not worth having for someone who
+  binds keyboard chords alone.
 
 | Chord | Action |
 |---|---|
@@ -195,10 +213,13 @@ two ways of saying the same thing. They then disagreed the moment the window was
 while the factor box went on showing the number it had before. Deriving the scale from the factor
 instead means nothing the window does can contradict the read-out.
 
-The shape travels with it: with the mask grown to the window, a rectangle region fills the window
-and shows the desktop beside it, and a circle region draws the largest circle the window shape
-allows. When the window is *smaller* than the region at that factor, the window crops — the shape
-keeps its own size and the window sits inside it, so a circle stays a circle.
+The shape is the window's own: it is the aperture the magnifier looks through, drawn inside whatever
+rectangle the window has. A rectangle region fills the window and shows the desktop beside it; a
+circle draws the largest circle the window can hold. Because the mask is the window rather than the
+region, **shrinking the window shrinks the shape** — it does not crop into the shape's middle, which
+is what a circle cannot survive (its middle is all circle, so the window filled edge to edge and the
+shape disappeared). When the window's aspect differs from the shape's, the difference stays
+transparent, as it always has.
 
 `适配选区` / *Fit to source* sets the window to exactly the region at the current factor, which is
 the size the factor asks for and the starting point for every zoom.
@@ -267,10 +288,10 @@ Setting `MAG_DIAG=1` appends the internal frame counters to the status line.
 ## Testing
 
 ```bash
-bash build.sh test              # 3054 assertions over the pure domain
+bash build.sh test              # 3460 assertions over the pure domain
 python tests/verify_features.py # the shipped defaults: language, centring, 10x cap, the slider, reset
 python tests/verify_picker.py   # the region picker: move, confirm button, double click, Enter
-python tests/verify_runtime.py  # 20 black-box acceptance checks against the real executable
+python tests/verify_runtime.py  # 21 black-box acceptance checks against the real executable
 python tests/verify_visual.py   # proves the magnification is pixel-exact, in all four shapes
 python tests/measure_perf.py    # the resource budgets, measured rather than assumed
 python tests/verify_stress.py   # repeated show/hide cycles and a display-configuration change
@@ -382,6 +403,10 @@ pretending otherwise:
 * `PrintScreen`, the media keys and the volume keys are consumed by the system before any window
   receives them, so the rebind field cannot capture them. Everything the keyboard actually delivers
   to a window can be bound.
+* A mouse button bound as a hotkey is taken over by the low-level mouse hook: the button no longer
+  reaches the window under the cursor, and strict compatibility mode (which refuses that hook) makes
+  the binding inert. The status line reports which of the two is happening.
+
 
 ## Configuration
 

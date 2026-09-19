@@ -105,8 +105,13 @@ private:
 
     // Low-level fallback bookkeeping.
     static LRESULT CALLBACK ll_keyboard_proc(int code, WPARAM wparam, LPARAM lparam);
+    // Mouse buttons cannot be registered at all, so a chord bound to one of
+    // them is served here: this is the only path that sees a mouse button
+    // outside the window under the cursor.
+    static LRESULT CALLBACK ll_mouse_proc(int code, WPARAM wparam, LPARAM lparam);
     static InputThread* ll_owner_;
     HHOOK ll_hook_{nullptr};
+    HHOOK ll_mouse_hook_{nullptr};
     std::atomic<bool> ll_enabled_{false};
     // Whether the hook was in force when the chords were released for a rebind,
     // so resuming restores the arrangement the user actually had. Input thread

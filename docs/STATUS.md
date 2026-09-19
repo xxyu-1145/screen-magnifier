@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-19, after the viewport-and-rebind revision._
+_Last updated: 2026-09-19, after the shape-and-mouse revision._
 
 ## Where the project stands
 
@@ -27,15 +27,74 @@ tests:      ./build.sh test
 
 | Suite | Result |
 |---|---|
-| `build.sh test` | **3054 / 3054** core checks pass (245 of them new: the viewport) |
-| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, editable presets, kept regions recalled intact, **the language switch leaves nothing of the old one behind**, clean exit |
+| `build.sh test` | **3460 / 3460** core checks pass (245 of them the viewport, 406 the hotkey text) |
+| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, fit-to-source restores the whole region, editable presets, kept regions recalled intact, the language switch leaves nothing of the old one behind, clean exit |
 | `verify_picker.py` | move-by-drag, on-screen confirm button, double-click confirm, Enter confirm |
-| `verify_runtime.py` | **20 / 20** acceptance checks pass, including a chord another application owns, **a chord the program itself owns being reassigned**, and **a bare key being refused with a word rather than in silence** |
-| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); **resizing the window keeps the configured factor** (4.24 vs 48.57 for what a fit scale would draw) |
+| `verify_runtime.py` | **21 / 21** acceptance checks pass, including a chord another application owns, a chord the program itself owns being reassigned, a bare key being refused with a word rather than in silence, and **a mouse button being bound and fired** |
+| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor (4.24 vs 48.57 for what a fit scale would draw); **every shape survives the window being shrunk to 406×305** (corners still masked away, rectangle still showing content) |
 | `measure_perf.py` | idle 37.7 MB / 0.00 % CPU; running **0.94 %** CPU; released to 3.1 MB when switched off |
 | `verify_stress.py` | 15 show/hide cycles, frames climbing at 56 fps; `WM_DISPLAYCHANGE` acknowledged |
 | `verify_package.py` | the shipped **.zip** unpacked into a folder named with Chinese characters and a space: starts, magnifies, quits 0, and every DLL it imports ships with Windows |
 | `tools/check_resources.py` | 7 icons, group icon 1, manifest 1; the shell reports the icon |
+
+## The shape-and-mouse revision (2026-09-19)
+
+Two more faults reported from use, both found by running the thing rather than by reading it.
+
+### Shrinking the window turned a circle back into a rectangle
+
+The mask was the *selection's* extent, grown to the window when the window was the larger of the
+two. That reads well — the window can show the desktop outside the region and still be shaped by the
+region — but it fails in the other direction: make the window smaller than the shape and the mask
+stays the shape's size while the window becomes a crop of its middle. A circle's middle is all
+circle, so the window filled edge to edge and the shape was simply gone. Measured with the probe
+below: a circle kept its shape down to 640px and was a plain rectangle at 400px.
+
+The mask is now **the window itself**. The shape is the aperture the magnifier looks through, so it
+shrinks with the window instead of being cropped by it; the selection still decides where the view
+is centred, how big the window starts, and which shape and corner radius are drawn. At the natural
+size — a window of exactly `region × factor` — the two definitions agree, which is why the four
+original shape checks are unchanged.
+
+**Checked** by extending `verify_visual.py`: after the natural-size measurement each shape drags the
+size slider down to 406×305 and requires the corners to behave the same way they did at full size —
+masked away for the circle, ellipse and rounded rectangle, showing content for the rectangle. On the
+previous build the three shaped cases report content at the corners and fail.
+
+### A mouse button could not be bound at all
+
+`RegisterHotKey` is the registered path for every chord, and it has no mouse chords. Worse, it does
+not say so: **it accepts a mouse virtual key and returns success**, and the system then never
+delivers one, so asking would have produced a chord that looks registered and does nothing — the one
+failure this whole subsystem exists to prevent. Mouse buttons now go straight past `RegisterHotKey`
+into the fallback table, which is what the low-level hook is for, and a `WH_MOUSE_LL` hook joins the
+keyboard one to serve them.
+
+Details worth keeping:
+
+* **The mouse hook is installed only while a mouse-button binding exists.** A `WH_MOUSE_LL` hook
+  costs every mouse event in the session — moves included, hundreds a second — a trip to the
+  program's input thread, and a keyboard chord another application owns does not need it. `apply_low_level()`
+  asks `fallback_has_mouse_chord()` before installing it.
+* **A bound mouse button is swallowed**, the same rule the keyboard chords follow: it stops reaching
+  the window under the cursor. Binding the middle button stops middle-drag everywhere. That is
+  documented in both readmes rather than softened, because the alternative — firing the action *and*
+  letting the button through — silently changes what the button does in every other program.
+* **A bare mouse button is allowed**, where a bare letter is not: nothing else uses a side button,
+  and "Ctrl + back button" is not a gesture anyone reaches for.
+* **The left button is deliberately not bindable.** Clicking the field with it is what starts the
+  capture, so binding it would make the arming gesture end the capture instead of beginning it.
+* `HotkeyChord` needed no new fields: `VK_XBUTTON1` and friends are virtual-key codes, so the model
+  already had room for them. What it needed was names — `Mouse4`, `Mouse5`, `MouseMiddle`,
+  `MouseRight`, plus `MouseBack`/`XButton1`-style aliases — so the field can show them and a
+  hand-edited file can spell them.
+
+**Checked** by two new pieces: 406 core checks that every shipped chord round-trips through its own
+text and that the mouse names parse, describe and survive the configuration file; and a runtime
+check that clicks a chord field, presses the back button, requires the app to store `[0, 5]` and to
+say the binding is hook-served, then presses the button for real and requires the magnification to
+change (1280×960 → 1600×1200). The status line's notice for this is its own string — a mouse chord
+is not "owned by another application", and reporting it as a conflict would have been a lie.
 
 ## The viewport-and-rebind revision (2026-09-19)
 

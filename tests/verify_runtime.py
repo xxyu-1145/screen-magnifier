@@ -577,6 +577,84 @@ def main() -> int:
         if p3.poll() is None:
             p3.terminate()
 
+    # --- a mouse button can be bound, and it fires ---------------------------
+    #
+    # RegisterHotKey has no mouse chords at all, and it does not say so: it
+    # *accepts* a mouse virtual key and reports success, and the system then
+    # never delivers one. A binding on a mouse button therefore lives on the
+    # low-level mouse hook -- also the only thing that can see a side button
+    # outside the window under the cursor -- and this check types one into a
+    # field, then presses it, and requires the action to happen.
+    if CONFIG.exists():
+        CONFIG.unlink()
+    p4 = subprocess.Popen([str(EXE)], cwd=str(ROOT))
+    try:
+        for _ in range(80):
+            time.sleep(0.25)
+            if find(p4.pid, "MagControlWindow"):
+                break
+        time.sleep(2.0)
+
+        settings4 = find(p4.pid, "MagControlWindow")[0][0]
+        click_to_foreground(settings4)
+        field4 = find_child(p4.pid, 1100 + ACTION["ZoomIn"])
+        if field4 is None:
+            rep.add("a mouse button can be bound as a hotkey, and it fires", False,
+                    "the chord field was not found")
+        else:
+            # The button is delivered to the window under the cursor, so put it
+            # over the field before pressing it there.
+            r = wt.RECT()
+            u.GetWindowRect(field4, ctypes.byref(r))
+            u.SetCursorPos((r.left + r.right) // 2, (r.top + r.bottom) // 2)
+            time.sleep(0.2)
+            click_control(field4)
+            time.sleep(0.6)
+
+            def xbutton(data: int) -> None:
+                for flags in (0x0080, 0x0100):          # XDOWN, XUP
+                    one = INPUT()
+                    one.type = 0                        # INPUT_MOUSE
+                    one.mi.mouseData = data
+                    one.mi.dwFlags = flags
+                    u.SendInput(1, ctypes.byref(one), ctypes.sizeof(INPUT))
+                    time.sleep(0.1)
+                time.sleep(0.5)
+
+            VK_XBUTTON1, XBUTTON1 = 0x05, 0x0001
+            xbutton(XBUTTON1)
+            time.sleep(1.2)
+            bound = saved("hotkeys", {}).get("ZoomIn") == [0, VK_XBUTTON1]
+            mouse_notice = "鼠标按键" in status(p4.pid) or "mouse-button" in status(p4.pid)
+
+            press(p4.pid, "ToggleMagnifier")
+            time.sleep(2.0)
+
+            def output_size():
+                m = re.search(r"输出\s+(\d+)x(\d+)", status(p4.pid))
+                if m:
+                    return (int(m.group(1)), int(m.group(2)))
+                m = re.search(r"Output\s+(\d+)x(\d+)", status(p4.pid))
+                return (int(m.group(1)), int(m.group(2))) if m else None
+
+            before = output_size()
+            xbutton(XBUTTON1)                # the chord it now holds
+            time.sleep(1.5)
+            after = output_size()
+            rep.add("a mouse button can be bound as a hotkey, and it fires",
+                    bound and mouse_notice and before is not None and after != before,
+                    f"bound={saved('hotkeys', {}).get('ZoomIn')} notice={mouse_notice} "
+                    f"output {before} -> {after}")
+
+        press(p4.pid, "Quit")
+        try:
+            p4.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            p4.terminate()
+    finally:
+        if p4.poll() is None:
+            p4.terminate()
+
     print("\n" + "=" * 74)
     total = len(rep.checks)
     print(f"{total - rep.failures}/{total} checks passed")

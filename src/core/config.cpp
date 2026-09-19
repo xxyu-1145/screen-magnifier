@@ -49,7 +49,9 @@ struct KeyName {
 // Canonical display names. describe_virtual_key() emits these and
 // parse_chord() accepts them, so the pair always round-trips.
 constexpr KeyName kKeyNames[] = {
-    {"Backspace", 0x08},        {"Tab", 0x09},          {"Enter", 0x0D},
+    {"MouseRight", 0x02},       {"MouseMiddle", 0x04},  {"Mouse4", 0x05},
+    {"Mouse5", 0x06},           {"Backspace", 0x08},    {"Tab", 0x09},
+    {"Enter", 0x0D},
     {"Pause", 0x13},            {"CapsLock", 0x14},     {"Esc", 0x1B},
     {"Space", 0x20},            {"PageUp", 0x21},       {"PageDown", 0x22},
     {"End", 0x23},              {"Home", 0x24},         {"Left", 0x25},
@@ -74,6 +76,13 @@ constexpr KeyName kKeyAliases[] = {
     {"PgUp", 0x21},     {"PgDn", 0x22},   {"Plus", 0xBB},  {"Minus", 0xBD},
     {"Equal", 0xBB},    {"Equals", 0xBB}, {"Windows", 0x5B}, {"Super", 0x5B},
     {"Meta", 0x5B},     {"Win", 0x5B},    {"Multiply", 0x6A},
+    // The mouse, in the words people use for it. The left button is deliberately
+    // absent: a chord on it would have to swallow every click in the session,
+    // including the ones that would take the binding back, so it is not a chord
+    // this program will accept.
+    {"MouseBack", 0x05},  {"MouseForward", 0x06},  {"XButton1", 0x05},
+    {"XButton2", 0x06},   {"Middle", 0x04},        {"MMB", 0x04},
+    {"RMB", 0x02},
 };
 
 constexpr std::size_t kKeyNameCount = sizeof(kKeyNames) / sizeof(kKeyNames[0]);

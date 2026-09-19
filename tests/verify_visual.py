@@ -260,6 +260,30 @@ def mean_abs_diff(a: Image.Image, b: Image.Image) -> float:
     return total / max(n, 1)
 
 
+def shape_at(shot: Image.Image, rect: tuple[int, int, int, int], factor: float):
+    """The window's content, and how far its corners are from showing any.
+
+    The expectation is the desktop magnified by exactly `factor`, centred on the
+    region, which is what the viewport shows at *any* window size. Corners that
+    match it are showing content; corners that do not have been masked away, and
+    that is what says the shape is still a shape.
+    """
+    wx0, wy0, wx1, wy1 = rect
+    ww, wh = wx1 - wx0, wy1 - wy0
+    vis_w, vis_h = ww / factor, wh / factor
+    vx = int(round(SRC_X + SRC_W / 2.0 - vis_w / 2.0))
+    vy = int(round(SRC_Y + SRC_H / 2.0 - vis_h / 2.0))
+    expected = shot.crop((vx, vy, vx + int(vis_w), vy + int(vis_h))) \
+                   .resize((ww, wh), Image.NEAREST)
+    actual = shot.crop((wx0, wy0, wx1, wy1))
+    corners = 0
+    for fx, fy in ((0.03, 0.03), (0.97, 0.03), (0.03, 0.97), (0.97, 0.97)):
+        e = expected.getpixel((int(ww * fx), int(wh * fy)))
+        a = actual.getpixel((int(ww * fx), int(wh * fy)))
+        corners += sum(abs(e[i] - a[i]) for i in range(3))
+    return mean_abs_diff(expected, actual), corners
+
+
 def run_case(shape: str) -> bool:
     print(f"\n=== shape: {shape} ===")
     seed_config(shape)
@@ -331,6 +355,40 @@ def run_case(shape: str) -> bool:
         print(f"  corners behave as the shape implies : {corner_ok}")
         if shape == "Rectangle":
             print(f"  output is pixel-exact               : {exact_ok}")
+
+        # And the shape survives being made small. The mask is the window, so a
+        # circle shrinks with it; when the mask was the selection's own extent,
+        # a window smaller than the shape became a crop of the shape's middle --
+        # and a circle's middle is all circle, so the window filled edge to edge
+        # and read as a rectangle again below about 700px on this desktop.
+        slider = find_child(app.pid, 1035)
+        if slider is not None:
+            cr = wt.RECT()
+            u.GetClientRect(slider, ctypes.byref(cr))
+            thumb = int(cr.bottom * 0.32)
+            x = thumb + int(0.12 * (cr.right - 2 * thumb))
+            lp = ((cr.bottom // 2) << 16) | (x & 0xFFFF)
+            u.SendMessageW(slider, 0x0201, 0x0001, lp)
+            u.SendMessageW(slider, 0x0202, 0, lp)
+            time.sleep(2.5)
+
+            ov = find(app.pid, "MagOverlayWindow")
+            small = ov[0][2] if ov and ov[0][1] else None
+            if small is None:
+                print("  -> FAIL: the window vanished when it was made small")
+                return False
+            ww, wh = small[2] - small[0], small[3] - small[1]
+            shot = ImageGrab.grab(all_screens=True).convert("RGB")
+            whole, corners = shape_at(shot, small, FACTOR)
+            small_masked = corners > 120
+            small_ok = (small_masked == (shape != "Rectangle")) and whole < 60
+            print(f"  shrunk to {ww}x{wh}: corners "
+                  f"{'still masked away' if small_masked else 'showing content'} "
+                  f"(diff {corners}), whole window {whole:.1f} per channel")
+            if not small_ok:
+                print("    FAIL: the shape did not survive the window being made small")
+            ok = ok and small_ok
+
         print("  -> " + ("PASS" if ok else "FAIL"))
         return ok
     finally:

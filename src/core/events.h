@@ -57,6 +57,22 @@ constexpr bool chord_is_bound(const HotkeyChord& c) noexcept {
     return c.virtual_key != 0;
 }
 
+// The mouse buttons, as virtual-key codes. They are worth naming because
+// RegisterHotKey cannot register them at all -- a chord on one of these has to
+// be served by the low-level mouse hook, which is the only path that sees a
+// mouse button outside the window that owns it.
+constexpr bool is_mouse_button_vk(std::uint32_t vk) noexcept {
+    return vk == 0x01u ||  // VK_LBUTTON
+           vk == 0x02u ||  // VK_RBUTTON
+           vk == 0x04u ||  // VK_MBUTTON
+           vk == 0x05u ||  // VK_XBUTTON1, the "back" side button
+           vk == 0x06u;    // VK_XBUTTON2, the "forward" one
+}
+
+constexpr bool chord_is_mouse_button(const HotkeyChord& c) noexcept {
+    return is_mouse_button_vk(c.virtual_key);
+}
+
 // ---------------------------------------------------------------------------
 // Event payloads
 // ---------------------------------------------------------------------------

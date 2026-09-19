@@ -1012,6 +1012,15 @@ void AppHost::reregister_hotkeys() {
     if (!input_) return;
     std::vector<HotkeyAction> conflicts;
     input_->set_hotkeys(config_.hotkeys, conflicts);
+    // A mouse button always lands here: RegisterHotKey has no mouse chords at
+    // all, so it is not a conflict with anything, and the notice has to say
+    // what is really happening rather than blame another application.
+    bool mouse = false;
+    for (const HotkeyAction action : conflicts) {
+        if (chord_is_mouse_button(config_.hotkeys[static_cast<std::size_t>(action)])) {
+            mouse = true;
+        }
+    }
     if (conflicts.empty()) {
         input_->set_low_level_fallback(false);
         notice_ = Notice{};
@@ -1023,7 +1032,11 @@ void AppHost::reregister_hotkeys() {
     // program does not work at all. Strict compatibility mode is the one case
     // that refuses the hook, and that is the user asking for it.
     if (input_->set_low_level_fallback(true)) {
-        notice_ = Notice{Str::HotkeyTakenOver};
+        notice_ = mouse ? Notice{Str::HotkeyMouseHooked} : Notice{Str::HotkeyTakenOver};
+        return;
+    }
+    if (mouse) {
+        notice_ = Notice{Str::HotkeyMouseRefused};
         return;
     }
     notice_ = Notice{Str::HotkeyConflictCount, std::to_string(conflicts.size()), true};

@@ -117,6 +117,10 @@ enum class Language : std::uint32_t { Chinese = 0, English = 1 };
     X(HotkeyConflict, "部分快捷键已被其他程序占用", "some hotkeys are owned by another app") \
     X(HotkeyTakenOver, "部分快捷键原被其他程序占用，已由本程序接管",                            \
                        "some hotkeys were owned by another app; taken over")              \
+    X(HotkeyMouseHooked, "鼠标按键的快捷键由低级钩子生效",                                  \
+                         "mouse-button hotkeys are served by the low-level hook")          \
+    X(HotkeyMouseRefused, "严格兼容模式下鼠标按键快捷键不可用",                              \
+                          "mouse buttons need the low-level hook, which strict mode refuses") \
     X(HotkeyConflictCount, "个快捷键已被其他程序占用", " hotkey(s) are owned by another app") \
     X(SingleInstance, "屏幕放大镜已在运行", "Screen Magnifier is already running")       \
     X(SingleInstanceHint, "请查看任务栏通知区域中的图标。",                            \
