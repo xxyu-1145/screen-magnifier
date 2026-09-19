@@ -62,13 +62,13 @@ constexpr std::size_t kLadderCount = sizeof(kLadder) / sizeof(kLadder[0]);
 // ordering source and the controller has no counter member to keep.
 std::atomic<std::uint64_t> g_revision{0};
 
-// Q16.16 ratio dst/src, floored. Flooring guarantees a contain fit never
-// overshoots the client area once the source edge is scaled back up, and the
-// saturating cast keeps an absurd output size from wrapping into a tiny scale.
-constexpr Q16 ratio_q16(Px dst, Px src) noexcept {
-    const std::int64_t ratio = (static_cast<std::int64_t>(dst) << 16) / src;
-    if (ratio > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
-    return static_cast<Q16>(ratio);
+// Division that rounds towards negative infinity rather than towards zero, so
+// an odd leftover lands on the same side whichever way the operands point. Used
+// for centring, where truncation would bias the viewport by a pixel as soon as
+// the visible extent passes the selection.
+constexpr std::int64_t floor_div(std::int64_t value, std::int64_t divisor) noexcept {
+    const std::int64_t q = value / divisor;
+    return (value % divisor != 0 && ((value < 0) != (divisor < 0))) ? q - 1 : q;
 }
 
 }  // namespace
@@ -83,45 +83,35 @@ ViewportMapping compute_viewport(const SelectionConfig& sel,
     const Px out_h = mag.output_size_px.height;
     if (src_w <= 0 || src_h <= 0 || out_w <= 0 || out_h <= 0) return out;
 
-    const Q16 ratio_x = ratio_q16(out_w, src_w);
-    const Q16 ratio_y = ratio_q16(out_h, src_h);
-    // Both modes stay uniform: only the smaller (contain) or the larger
-    // (cover) of the two axis ratios is ever applied. A source larger than
-    // 65536 px per axis floors both ratios to zero, so the scale is nudged to
-    // the smallest representable step before it can be divided by.
-    Q16 scale = mag.keep_aspect_ratio ? (ratio_x < ratio_y ? ratio_x : ratio_y)
-                                      : (ratio_x > ratio_y ? ratio_x : ratio_y);
-    if (scale == 0) scale = 1;
+    // The factor is the magnification, full stop. The old model scaled the
+    // source to *fit* the window, which made the window size and the factor two
+    // ways of saying the same thing: drag an edge and the picture zoomed, while
+    // the factor box went on claiming the old number -- and on the shipped
+    // defaults (a 320x240 region claiming 4x in a 640x480 window) it was wrong
+    // from the first frame. Deriving the scale from the factor instead means no
+    // resize can contradict the read-out.
+    Q16 scale = mag.factor_q16;
+    if (scale < kFactorMin) scale = kFactorMin;
+    if (scale > kFactorMax) scale = kFactorMax;
     out.applied_scale_q16 = scale;
     out.valid = true;
-
-    if (mag.keep_aspect_ratio) {
-        // Contain: the whole source remains visible and the leftover area is
-        // letterboxed, so src_sub_rect is simply the full extent.
-        const Px dest_w = scale_px(src_w, scale);
-        const Px dest_h = scale_px(src_h, scale);
-        const Px left = (out_w - dest_w) / 2;
-        const Px top = (out_h - dest_h) / 2;
-        out.dest_rect_px = RectPx{left, top, left + dest_w, top + dest_h};
-        out.src_sub_rect_px = RectPx{0, 0, src_w, src_h};
-        out.letterboxed = dest_w != out_w || dest_h != out_h;
-        return out;
-    }
-
-    // Cover: the client area is filled, and this is the only path allowed to
-    // crop. Invert the scale to find the source window that actually shows,
-    // then centre it; the clamp keeps rounding from admitting source pixels
-    // that no longer exist.
     out.dest_rect_px = RectPx{0, 0, out_w, out_h};
-    Px vis_w = static_cast<Px>((static_cast<std::int64_t>(out_w) << 16) / scale);
-    Px vis_h = static_cast<Px>((static_cast<std::int64_t>(out_h) << 16) / scale);
-    vis_w = clamp_px(vis_w, 1, src_w);
-    vis_h = clamp_px(vis_h, 1, src_h);
-    const Px src_left = (src_w - vis_w) / 2;
-    const Px src_top = (src_h - vis_h) / 2;
-    out.src_sub_rect_px =
-        RectPx{src_left, src_top, src_left + vis_w, src_top + vis_h};
-    out.letterboxed = false;
+
+    // The source extent that fills the client at that scale, centred on the
+    // region and free to leave it: the viewport is a window onto the desktop,
+    // so a bigger window shows more of the screen rather than a bigger picture.
+    const Px vis_w = static_cast<Px>(
+        std::max<std::int64_t>(1, (static_cast<std::int64_t>(out_w) << 16) / scale));
+    const Px vis_h = static_cast<Px>(
+        std::max<std::int64_t>(1, (static_cast<std::int64_t>(out_h) << 16) / scale));
+    // Floored rather than truncated, so the region stays centred to the pixel
+    // when the visible extent is odd and the window is not an exact multiple.
+    const auto centred = [](Px extent, Px visible) noexcept {
+        return static_cast<Px>(floor_div(static_cast<std::int64_t>(extent - visible), 2));
+    };
+    const Px left = centred(src_w, vis_w);
+    const Px top = centred(src_h, vis_h);
+    out.src_sub_rect_px = RectPx{left, top, left + vis_w, top + vis_h};
     return out;
 }
 

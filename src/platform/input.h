@@ -58,6 +58,15 @@ public:
     // It is the flag that refuses the hook, so it cannot live only in start().
     void set_strict_compat(bool strict);
 
+    // Releases every chord -- and the fallback hook with it -- while the user is
+    // typing a new one into the settings window, then puts both back. The chord
+    // table is untouched, so resuming re-registers exactly what was in force.
+    //
+    // RegisterHotKey consumes the combinations it owns: without this, pressing a
+    // chord the program already holds does nothing to the field and fires the
+    // action instead, which is the one thing a rebind must not do.
+    void set_registration_suspended(bool suspended);
+
     // Publishes the rectangle the edge-dwell detector watches, in virtual
     // desktop physical pixels. Disabled when `enabled` is false.
     void set_edge_zone(std::optional<RectPx> zone_px, Px band_px, bool enabled);
@@ -70,6 +79,10 @@ private:
     void register_all(const std::array<HotkeyChord, kHotkeyCount>& chords,
                       std::vector<HotkeyAction>& out_conflicts);
     void unregister_all();
+    // Installs or removes the WH_KEYBOARD_LL fallback and reports whether it is
+    // in force afterwards. Input thread only: a hook has to be installed by the
+    // thread that pumps messages.
+    bool apply_low_level(bool enabled);
     void poll_cursor();
 
     BoundedEventBus& bus_;
@@ -95,6 +108,11 @@ private:
     static InputThread* ll_owner_;
     HHOOK ll_hook_{nullptr};
     std::atomic<bool> ll_enabled_{false};
+    // Whether the hook was in force when the chords were released for a rebind,
+    // so resuming restores the arrangement the user actually had. Input thread
+    // only.
+    bool ll_resume_{false};
+    bool suspended_{false};
 };
 
 }  // namespace mag

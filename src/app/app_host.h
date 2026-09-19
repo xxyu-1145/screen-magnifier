@@ -186,7 +186,21 @@ private:
     std::string status_text_;
     // A transient message (capture lost, hotkey conflicts) that survives
     // refresh_status(), which otherwise rebuilds the status line from scratch.
-    std::string notice_;
+    //
+    // It keeps the string *id* rather than the translated text, because the
+    // line is rebuilt on every refresh: text captured when the event happened
+    // would go on being shown in whatever language was in force then, so a
+    // conflict reported at startup stayed Chinese after the switch to English.
+    struct Notice {
+        Str id{Str::Count};        // Str::Count when nothing is localised
+        std::string detail;        // a count, an HRESULT message, diagnostics
+        bool detail_first{false};  // "3 hotkeys..." rather than "capture lost: 3"
+
+        bool empty() const noexcept {
+            return id == Str::Count && detail.empty();
+        }
+    };
+    Notice notice_{};
     // Kept apart from notice_ so a capture message cannot overwrite a renderer
     // failure: losing that message would hide the reason the window is blank.
     std::string render_error_;

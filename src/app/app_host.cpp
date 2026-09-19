@@ -199,7 +199,7 @@ LRESULT CALLBACK AppHost::pump_wnd_proc(HWND hwnd, UINT message, WPARAM wparam, 
             // A monitor was added, removed, or had its mode changed, so the
             // topology snapshot and every rectangle derived from it has to be
             // rebuilt; otherwise the selection would address the old layout.
-            g_host->notice_ = tr_utf8(Str::DisplayChanged);
+            g_host->notice_ = Notice{Str::DisplayChanged};
             g_host->bus_.publish(make_event(TopologyChanged{0}));
             return 0;
         }
@@ -236,7 +236,7 @@ bool AppHost::initialize() {
                       width_of(topo_.virtual_desktop_px), height_of(topo_.virtual_desktop_px),
                       topo_.monitors.size(), ::GetSystemMetrics(SM_CXSCREEN),
                       ::GetSystemMetrics(SM_CYSCREEN));
-        notice_ = buf;
+        notice_ = Notice{Str::Count, buf};
     }
 
     load_config_or_defaults();
@@ -359,7 +359,7 @@ bool AppHost::initialize() {
     // off case to a default makes the setting look like it does nothing.
     exclude_from_capture_active_ = overlay_.exclude_from_capture(config_.exclude_self_from_capture);
     if (config_.exclude_self_from_capture && !exclude_from_capture_active_) {
-        notice_ = tr_utf8(Str::ExcludeRefused);
+        notice_ = Notice{Str::ExcludeRefused};
     }
 
     // --- region picker ---
@@ -438,6 +438,13 @@ bool AppHost::initialize() {
         if (magnifier_) magnifier_->set_output_position(p);
         apply_geometry_to_window();
         publish_snapshot();
+    };
+    ui.on_chord_capture = [this](bool capturing) {
+        // RegisterHotKey swallows the combinations this program owns, so while
+        // the settings window is waiting for a chord they are all released:
+        // otherwise pressing Ctrl+Alt+M to rebind something else would toggle
+        // the magnifier and the field would never see the key.
+        if (input_) input_->set_registration_suspended(capturing);
     };
     ui.on_hotkeys_changed = [this](const std::array<HotkeyChord, kHotkeyCount>& chords) {
         config_.hotkeys = chords;
@@ -545,7 +552,7 @@ void AppHost::load_config_or_defaults() {
     if (!validate(config_, topo_.virtual_desktop_px)) {
         config_ = AppConfig::defaults();
         validate(config_, topo_.virtual_desktop_px);
-        notice_ = tr_utf8(Str::SettingsRestored);
+        notice_ = Notice{Str::SettingsRestored};
     }
     // The stored language has to be in force before any window is created, or
     // the UI would come up in the wrong one.
@@ -708,12 +715,14 @@ void AppHost::handle_event(const AppEvent& event) {
                 if (payload.code == 2) {
                     render_error_ = payload.text;
                 } else {
-                    notice_ = payload.text.empty() ? "capture error" : payload.text;
+                    notice_ = Notice{Str::Count,
+                                     payload.text.empty() ? "capture error"
+                                                          : payload.text};
                 }
                 refresh_status();
                 ui_dirty_ = true;
             } else if constexpr (std::is_same_v<T, RenderFault>) {
-                notice_ = tr_utf8(Str::RendererUnavailable);
+                notice_ = Notice{Str::RendererUnavailable};
                 ui_dirty_ = true;
             } else if constexpr (std::is_same_v<T, QuitRequested>) {
                 quit();
@@ -896,10 +905,18 @@ void AppHost::step_factor(int steps) {
 
 void AppHost::set_output_size(SizePx size) {
     if (!magnifier_) return;
-    try {
-        magnifier_->resize_output(size);
-    } catch (const std::out_of_range&) {
-        return;
+    if (size.width <= 0 || size.height <= 0) {
+        // The settings window's "fit to source" sends an empty size, which is
+        // the one window shape that shows the whole region and nothing else.
+        // It used to be sent straight to resize_output(), whose range check
+        // rejected it -- so the button did nothing at all, in either direction.
+        if (selection_) magnifier_->fit_output_to_selection(selection_->current());
+    } else {
+        try {
+            magnifier_->resize_output(size);
+        } catch (const std::out_of_range&) {
+            return;
+        }
     }
     config_.output_size_px = magnifier_->current().output_size_px;
     apply_geometry_to_window();
@@ -997,7 +1014,7 @@ void AppHost::reregister_hotkeys() {
     input_->set_hotkeys(config_.hotkeys, conflicts);
     if (conflicts.empty()) {
         input_->set_low_level_fallback(false);
-        notice_.clear();
+        notice_ = Notice{};
         return;
     }
     // A chord another application already owns is what the low-level fallback
@@ -1006,10 +1023,10 @@ void AppHost::reregister_hotkeys() {
     // program does not work at all. Strict compatibility mode is the one case
     // that refuses the hook, and that is the user asking for it.
     if (input_->set_low_level_fallback(true)) {
-        notice_ = tr_utf8(Str::HotkeyTakenOver);
+        notice_ = Notice{Str::HotkeyTakenOver};
         return;
     }
-    notice_ = std::to_string(conflicts.size()) + tr_utf8(Str::HotkeyConflictCount);
+    notice_ = Notice{Str::HotkeyConflictCount, std::to_string(conflicts.size()), true};
 }
 
 void AppHost::recall_selection_slot(int index) {
@@ -1120,7 +1137,7 @@ void AppHost::handle_capture_lost(std::uint32_t output_id) {
     suspended_ = true;
     if (fsm_) fsm_->on_capture_lost();
     overlay_.set_content_stale(true);
-    notice_ = tr_utf8(Str::CaptureLost);
+    notice_ = Notice{Str::CaptureLost};
     refresh_status();
     ui_dirty_ = true;
 }
@@ -1131,7 +1148,7 @@ void AppHost::handle_capture_recovered(std::uint32_t output_id) {
     suspended_ = false;
     overlay_.set_content_stale(false);
     if (fsm_) fsm_->on_capture_recovered();
-    notice_.clear();
+    notice_ = Notice{};
     publish_snapshot();
     refresh_status();
     ui_dirty_ = true;
@@ -1168,7 +1185,11 @@ void AppHost::refresh_status() {
     if (!render_error_.empty()) status_text_ = render_error_;
     if (!notice_.empty()) {
         if (!status_text_.empty()) status_text_ += "   ";
-        status_text_ += notice_;
+        // Composed here rather than when the event arrived, so the line is in
+        // whatever language is in force now.
+        if (notice_.detail_first) status_text_ += notice_.detail;
+        if (notice_.id != Str::Count) status_text_ += tr_utf8(notice_.id);
+        if (!notice_.detail_first) status_text_ += notice_.detail;
     }
     // The exact HRESULT is what turns "capture is broken" into something
     // actionable, so the backend's own words belong on screen too.

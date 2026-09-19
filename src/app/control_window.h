@@ -34,6 +34,11 @@ public:
         std::function<void(bool)> on_keep_aspect_changed;
         std::function<void(PointPx)> on_output_position_changed;
         std::function<void(const std::array<HotkeyChord, kHotkeyCount>&)> on_hotkeys_changed;
+        // True while the settings window is waiting for a chord to be typed.
+        // RegisterHotKey consumes the chords this program owns, so they have to
+        // be released for the duration or the one the user is most likely to
+        // try -- one it already holds -- would fire its action instead.
+        std::function<void(bool)> on_chord_capture;
         std::function<void(bool)> on_strict_compat_changed;
         std::function<void(Px, int, bool)> on_edge_dwell_changed;
         std::function<void(ScaleFilter)> on_filter_changed;

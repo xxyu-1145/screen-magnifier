@@ -768,6 +768,99 @@ void test_selection_slots() {
     CHECK(older.selection_slots[0].shape == mag::SelectionShape::Ellipse);
 }
 
+// ---------------------------------------------------------------------------
+// §5.4 the viewport: the factor is the magnification, the window is a window
+// ---------------------------------------------------------------------------
+
+void test_viewport() {
+    const mag::SelectionConfig sel{mk(100, 200, 420, 440),  // 320x240
+                                   mag::SelectionShape::Rectangle, 0};
+    mag::MagnificationConfig cfg;
+    cfg.factor_q16 = mag::kQ16One * 4;
+
+    // At the size the factor asks for, the viewport is exactly the selection:
+    // nothing is cropped and nothing outside it is shown.
+    cfg.output_size_px = mag::SizePx{1280, 960};
+    mag::ViewportMapping vp = mag::compute_viewport(sel, cfg);
+    CHECK(vp.valid);
+    CHECK(vp.applied_scale_q16 == mag::kQ16One * 4);
+    CHECK(vp.dest_rect_px == (mag::RectPx{0, 0, 1280, 960}));
+    CHECK(vp.src_sub_rect_px == (mag::RectPx{0, 0, 320, 240}));
+
+    // A window twice that shape shows twice the desktop, still at 4x. This is
+    // the whole point: the picture does not grow with the window, so the factor
+    // box cannot be contradicted by a resize.
+    cfg.output_size_px = mag::SizePx{2560, 1920};
+    vp = mag::compute_viewport(sel, cfg);
+    CHECK(vp.applied_scale_q16 == mag::kQ16One * 4);
+    CHECK(mag::width_of(vp.src_sub_rect_px) == 640);
+    CHECK(mag::height_of(vp.src_sub_rect_px) == 480);
+    // Centred on the selection: 160 source pixels of desktop on either side.
+    CHECK(vp.src_sub_rect_px.left == -160);
+    CHECK(vp.src_sub_rect_px.top == -120);
+
+    // A window smaller than the region crops it, and still does not zoom it.
+    cfg.output_size_px = mag::SizePx{640, 480};
+    vp = mag::compute_viewport(sel, cfg);
+    CHECK(vp.applied_scale_q16 == mag::kQ16One * 4);
+    CHECK(vp.src_sub_rect_px == (mag::RectPx{80, 60, 240, 180}));
+
+    // A window one pixel over an exact multiple still magnifies by the factor:
+    // the visible extent is floored, so the extra pixel is trimmed rather than
+    // changing the scale.
+    cfg.output_size_px = mag::SizePx{1281, 961};
+    vp = mag::compute_viewport(sel, cfg);
+    CHECK(vp.applied_scale_q16 == mag::kQ16One * 4);
+    CHECK(mag::width_of(vp.src_sub_rect_px) == 320);
+    CHECK(mag::height_of(vp.src_sub_rect_px) == 240);
+
+    // The scale is the factor for every window size, a non-integer factor
+    // included, and the visible extent is always what fills the window.
+    const Q16 factors[] = {mag::kQ16One, mag::q16_from_double(1.25),
+                           mag::kQ16One * 2, mag::q16_from_double(3.5),
+                           mag::kFactorMax};
+    const mag::SizePx windows[] = {mag::SizePx{120, 120}, mag::SizePx{640, 480},
+                                   mag::SizePx{1280, 960}, mag::SizePx{1920, 1080},
+                                   mag::SizePx{1000, 400}};
+    for (const Q16 factor : factors) {
+        cfg.factor_q16 = factor;
+        for (const mag::SizePx& size : windows) {
+            cfg.output_size_px = size;
+            vp = mag::compute_viewport(sel, cfg);
+            CHECK(vp.applied_scale_q16 == factor);
+            // The visible source, scaled back up, covers the window to within
+            // the rounding of one source pixel.
+            const Px covered_w = mag::scale_px(mag::width_of(vp.src_sub_rect_px), factor);
+            const Px covered_h = mag::scale_px(mag::height_of(vp.src_sub_rect_px), factor);
+            CHECK(covered_w <= size.width);
+            CHECK(covered_h <= size.height);
+            CHECK(covered_w + mag::scale_px(1, factor) > size.width);
+            CHECK(covered_h + mag::scale_px(1, factor) > size.height);
+            // And it stays centred on the region, whatever the window is doing.
+            const Px centre_x = 2 * vp.src_sub_rect_px.left + mag::width_of(vp.src_sub_rect_px);
+            const Px centre_y = 2 * vp.src_sub_rect_px.top + mag::height_of(vp.src_sub_rect_px);
+            CHECK(centre_x == 320 || centre_x == 319);
+            CHECK(centre_y == 240 || centre_y == 239);
+        }
+    }
+
+    // A factor outside the supported range is clamped rather than thrown on:
+    // compute_viewport() is noexcept and must answer with something drawable.
+    cfg.factor_q16 = mag::kFactorMax + mag::kQ16One;
+    cfg.output_size_px = mag::SizePx{640, 480};
+    vp = mag::compute_viewport(sel, cfg);
+    CHECK(vp.valid);
+    CHECK(vp.applied_scale_q16 == mag::kFactorMax);
+
+    // Degenerate input is reported rather than divided by.
+    mag::MagnificationConfig empty_size;
+    empty_size.output_size_px = mag::SizePx{0, 0};
+    CHECK(!mag::compute_viewport(sel, empty_size).valid);
+    mag::SelectionConfig empty_sel{mk(10, 10, 10, 10), mag::SelectionShape::Rectangle, 0};
+    cfg.output_size_px = mag::SizePx{640, 480};
+    CHECK(!mag::compute_viewport(empty_sel, cfg).valid);
+}
+
 }  // namespace
 
 int main() {
@@ -781,6 +874,7 @@ int main() {
     test_selection_drag();
     test_random_round_trips();
     test_magnification_controller();
+    test_viewport();
     test_selection_slots();
     test_interaction_state_machine();
 

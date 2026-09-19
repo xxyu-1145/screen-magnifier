@@ -25,7 +25,9 @@ slider, and made to ignore the mouse entirely.*
   drags reach the game underneath. Parking the cursor against its border for half a second brings it
   back, so the way out never depends on remembering a chord.
 * **Everything is rebindable**, and a chord another application already owns is taken over rather
-  than silently dropped.
+  than silently dropped. A chord *this* program already owns can be reassigned too: its own
+  registrations are released while a chord field is waiting, so pressing `Ctrl+Alt+M` to give that
+  chord to something else types it into the field instead of toggling the magnifier.
 * **Keep four regions.** Frame the minimap once, frame the status bar once, switch between them with
   a click instead of re-dragging.
 * **Set the four preset factors** by typing them, and jump to them from the keyboard.
@@ -48,7 +50,11 @@ The app starts minimised to the notification area with a settings window open. P
 ### Default hotkeys
 
 All of them are rebindable in the settings window — click a chord field and press the new
-combination (`Esc` cancels).
+combination (`Esc` cancels). A chord needs a modifier: bare keys would swallow that key in every
+other program, so a bare letter is refused and the field says so, while the function keys are
+allowed on their own because that is what people expect of them. A key the system takes before any
+window sees it — `PrintScreen`, the media and volume keys — cannot be captured by the field and
+will not appear there.
 
 | Chord | Action |
 |---|---|
@@ -95,6 +101,8 @@ anyone who does not want a keyboard hook in their session.
   settings window, or type an exact size. Every one of them holds the window's centre, so it grows
   and shrinks in place instead of walking across the desktop; `Ctrl+Alt+C` puts it back in the
   middle if it has wandered. The minimum is 120×120 and the maximum is the current desktop.
+  Resizing changes how much of the screen the window shows, never the magnification — for a bigger
+  or smaller picture, use the factor.
 * **Change language** — the `中文` / `English` toggle in the settings header switches the whole
   interface and the tray menu immediately, and the choice is saved.
 * **Keep a region** — the numbered buttons under the shapes hold four regions. Click one to
@@ -173,17 +181,27 @@ Two details keep it from flickering while the zoom slider is dragged. The window
 of them paint over it again; and `sync()` compares the incoming state against the last one it
 pushed, so a slider tick only touches the read-out instead of rewriting every label and checkbox.
 
-### Why the window sizes itself from the zoom factor
+### Why the window is a viewport and not a stretched picture
 
-Keeping the resolution independent of the zoom would let the two disagree: ask for 8× and get
-whatever the window implied. Instead the factor drives the window size (selection × factor, clamped
-to the desktop), and the window is then the viewport. When the user deliberately makes the window an
-extreme shape, the two documented policies apply and both scale uniformly so the picture is never
-distorted:
+The factor is the magnification, always. The window is a window onto the desktop: it shows
+`window ÷ factor` worth of screen, centred on the region, and a resize changes how much is in view
+and never how big it is. A 320×240 region at 4× is 320×240 pixels of source drawn 4× in whatever
+window it is given — the whole region in a 1280×960 window, the middle quarter of it in a 640×480
+one, and the region with 40 pixels of desktop around each edge in a 1440×1080 one.
 
-* **Keep aspect on** (default) — *contain*: the whole source stays visible, centred, with the
-  leftover filled transparent.
-* **Keep aspect off** — *cover*: the window is filled and the overflow is cropped.
+The earlier model scaled the source to *fit* the window, which made the window size and the factor
+two ways of saying the same thing. They then disagreed the moment the window was not exactly
+`selection × factor` — including on the shipped defaults — and dragging an edge zoomed the picture
+while the factor box went on showing the number it had before. Deriving the scale from the factor
+instead means nothing the window does can contradict the read-out.
+
+The shape travels with it: with the mask grown to the window, a rectangle region fills the window
+and shows the desktop beside it, and a circle region draws the largest circle the window shape
+allows. When the window is *smaller* than the region at that factor, the window crops — the shape
+keeps its own size and the window sits inside it, so a circle stays a circle.
+
+`适配选区` / *Fit to source* sets the window to exactly the region at the current factor, which is
+the size the factor asks for and the starting point for every zoom.
 
 ---
 
@@ -249,10 +267,10 @@ Setting `MAG_DIAG=1` appends the internal frame counters to the status line.
 ## Testing
 
 ```bash
-bash build.sh test              # 2809 assertions over the pure domain
+bash build.sh test              # 3054 assertions over the pure domain
 python tests/verify_features.py # the shipped defaults: language, centring, 10x cap, the slider, reset
 python tests/verify_picker.py   # the region picker: move, confirm button, double click, Enter
-python tests/verify_runtime.py  # 17 black-box acceptance checks against the real executable
+python tests/verify_runtime.py  # 20 black-box acceptance checks against the real executable
 python tests/verify_visual.py   # proves the magnification is pixel-exact, in all four shapes
 python tests/measure_perf.py    # the resource budgets, measured rather than assumed
 python tests/verify_stress.py   # repeated show/hide cycles and a display-configuration change
@@ -361,6 +379,9 @@ pretending otherwise:
 * Strict compatibility mode (settings window) drops the low-level keyboard fallback and keeps only
   `RegisterHotKey`. The fallback is otherwise used only for chords another application already owns,
   so a hotkey never silently does nothing.
+* `PrintScreen`, the media keys and the volume keys are consumed by the system before any window
+  receives them, so the rebind field cannot capture them. Everything the keyboard actually delivers
+  to a window can be bound.
 
 ## Configuration
 

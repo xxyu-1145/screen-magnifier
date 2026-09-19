@@ -123,6 +123,21 @@ def find(pid: int, cls: str):
     return res
 
 
+def find_child(pid: int, ctrl_id: int):
+    """The settings window's child with this control id, whatever its class."""
+    found = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(h, _):
+        if u.GetDlgCtrlID(h) == ctrl_id:
+            found.append(h)
+        return True
+
+    for h, _, _ in find(pid, "MagControlWindow"):
+        u.EnumChildWindows(h, cb, 0)
+    return found[0] if found else None
+
+
 def status_of(pid: int) -> str:
     out: list[str] = []
 
@@ -323,6 +338,113 @@ def run_case(shape: str) -> bool:
             quit_app(app)
 
 
+def content_diff(shot: Image.Image, rect: tuple[int, int, int, int], factor: float) -> float:
+    """How well a window matches the desktop magnified by exactly `factor`.
+
+    The viewport is the centred crop of the desktop that fills the window at
+    that scale, so the expectation is built from the window's own size rather
+    than from the region: a window that resized while keeping the zoom shows
+    *more* of the desktop, and one that resized by rescaling the picture shows
+    the same desktop bigger. Only the first matches.
+
+    ±2px of slack absorbs the integer rounding of the centring, which the app
+    floors and this side rounds.
+    """
+    wx0, wy0, wx1, wy1 = rect
+    ww, wh = wx1 - wx0, wy1 - wy0
+    vis_w, vis_h = ww / factor, wh / factor
+    cx, cy = SRC_X + SRC_W / 2.0, SRC_Y + SRC_H / 2.0
+    window = shot.crop((wx0, wy0, wx1, wy1))
+    best = float("inf")
+    for dx in (-2, -1, 0, 1, 2):
+        for dy in (-2, -1, 0, 1, 2):
+            vx = int(round(cx - vis_w / 2.0 + dx))
+            vy = int(round(cy - vis_h / 2.0 + dy))
+            expected = shot.crop((vx, vy, vx + int(vis_w), vy + int(vis_h))) \
+                           .resize((ww, wh), Image.NEAREST)
+            best = min(best, mean_abs_diff(expected, window))
+    return best
+
+
+def run_viewport_case() -> bool:
+    """Resizing the window changes how much is in view, never the magnification.
+
+    The old model scaled the source to *fit* the window, which made the window
+    size and the factor two ways of saying the same thing: dragging an edge
+    zoomed the picture while the factor box went on claiming 4x — and on the
+    shipped defaults, a 640x480 window over a 320x240 region, it was wrong from
+    the first frame.
+    """
+    print("\n=== resizing the window does not change the magnification ===")
+    seed_config("Rectangle")
+    app = None
+    try:
+        app = launch()
+        press(app.pid, TOGGLE_MAGNIFIER)
+        time.sleep(3.5)
+
+        ov = find(app.pid, "MagOverlayWindow")
+        if not ov or not ov[0][1]:
+            print("FAIL: the magnifier window is not visible")
+            return False
+        before = ov[0][2]
+        was_w = before[2] - before[0]
+
+        slider = find_child(app.pid, 1035)
+        settings = find(app.pid, "MagControlWindow")[0][0]
+        if slider is None:
+            print("FAIL: the size slider was not found")
+            return False
+        u.SetForegroundWindow(settings)
+        time.sleep(0.4)
+
+        # Drag the slider to the right of wherever it is now, so the window
+        # grows. It keeps its proportions, so it grows in both axes.
+        cr = wt.RECT()
+        u.GetClientRect(slider, ctypes.byref(cr))
+        thumb = int(cr.bottom * 0.32)
+        x = thumb + int(0.55 * (cr.right - 2 * thumb))
+        lp = ((cr.bottom // 2) << 16) | (x & 0xFFFF)
+        u.SendMessageW(slider, 0x0201, 0x0001, lp)
+        u.SendMessageW(slider, 0x0202, 0, lp)
+        time.sleep(2.0)
+
+        ov = find(app.pid, "MagOverlayWindow")
+        after = ov[0][2]
+        now_w = after[2] - after[0]
+        print(f"window: {before} -> {after}")
+
+        if now_w <= was_w:
+            print(f"    FAIL: the size slider did not enlarge the window "
+                  f"({was_w}px -> {now_w}px)")
+            return False
+
+        shot = ImageGrab.grab(all_screens=True).convert("RGB")
+        vis_w, vis_h = now_w / FACTOR, (after[3] - after[1]) / FACTOR
+        print(f"visible source: {vis_w:.0f}x{vis_h:.0f} at {FACTOR}x "
+              f"(the region is {SRC_W}x{SRC_H})")
+        shown_more = vis_w > SRC_W or vis_h > SRC_H
+        at_factor = content_diff(shot, after, FACTOR)
+        # The same window read as "the region stretched to fit" -- what the old
+        # code drew -- so the check is shown to discriminate rather than to
+        # agree with whatever is on screen.
+        fit = min(now_w / SRC_W, (after[3] - after[1]) / SRC_H)
+        at_fit = content_diff(shot, after, fit)
+        print(f"match at the configured factor : {at_factor:.2f} per channel")
+        print(f"match at the fit scale ({fit:.2f}x)   : {at_fit:.2f} per channel")
+
+        ok = at_factor < 6.0 and at_fit > at_factor * 3.0
+        if not shown_more:
+            print("    note: the window did not grow past the region at this factor")
+        print(f"  the picture is still exactly {FACTOR}.00x  : {at_factor < 6.0}")
+        print(f"  and is not what a fit scale would draw    : {at_fit > at_factor * 3.0}")
+        print("  -> " + ("PASS" if ok else "FAIL"))
+        return ok
+    finally:
+        if app is not None:
+            quit_app(app)
+
+
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     print(f"pattern [{SRC_X},{SRC_Y},{SRC_X+SRC_W},{SRC_Y+SRC_H}] at {FACTOR}x "
@@ -333,6 +455,7 @@ def main() -> int:
         time.sleep(1.0)
         for shape in ("Rectangle", "Circle", "Ellipse", "RoundedRectangle"):
             results[shape] = run_case(shape)
+        results["Resize keeps the zoom"] = run_viewport_case()
     finally:
         try:
             root.destroy()

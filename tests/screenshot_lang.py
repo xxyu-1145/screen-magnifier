@@ -129,7 +129,11 @@ def main() -> int:
         after = texts(children(p.pid, "MagControlWindow"))
         chinese_after = sum(1 for t in after if any('一' <= c <= '鿿' for c in t))
         print(f"after the toggle: {chinese_after} of {len(after)} labels contain Chinese")
-        if chinese_after > 3:
+        # One is correct and expected: the 「中文」 toggle, whose label is the name
+        # of the language it selects. Anything more is a label that did not
+        # follow -- the start/stop button and the status line's notices were
+        # both left behind when this was first written.
+        if chinese_after > 1:
             print("  FAIL: the interface did not switch to English")
             failures += 1
         else:

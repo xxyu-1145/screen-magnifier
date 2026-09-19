@@ -69,6 +69,8 @@ enum class Language : std::uint32_t { Chinese = 0, English = 1 };
     X(Ok, "确定", "OK")                                                                  \
     X(Cancel, "取消", "Cancel")                                                          \
     X(Unbound, "未设置", "unbound")                                                      \
+    X(HotkeyNeedsModifier, "需要配合 Ctrl / Alt / Shift / Win",                          \
+      "needs Ctrl, Alt, Shift or Win")                                                   \
     X(HotkeyHint, "点击右侧输入框，然后按下新的组合键；Esc 取消",                         \
       "Click a field, then press the new chord; Esc cancels")                              \
     /* --- interaction --- */                                                            \
