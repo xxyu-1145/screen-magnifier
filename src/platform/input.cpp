@@ -1,0 +1,500 @@
+// platform/input.cpp — the input thread: global hotkeys plus cursor sampling.
+//
+// Design doc §3.3: RegisterHotKey is the default path and the only one that is
+// allowed while strict compatibility mode is on. WH_KEYBOARD_LL exists solely
+// as a fallback for chords another application already owns, and the edge-dwell
+// detector never installs a mouse hook at all — it samples GetCursorPos here.
+
+#include "platform/input.h"
+
+#include <chrono>
+#include <condition_variable>
+#include <utility>
+
+namespace mag {
+namespace {
+
+// Hotkey ids handed to RegisterHotKey must stay inside 0x0000..0xBFFF. One
+// contiguous block keeps the translation from WM_HOTKEY back to an action
+// unambiguous and cannot collide with ids owned by other code in the process.
+constexpr int kHotkeyBaseId = 0x4000;
+constexpr UINT_PTR kEdgeTimerId = 1;
+constexpr UINT kEdgePollMs = 50;  // requirement 7 measures dwell in 500 ms steps
+
+// Thread messages: the input thread owns no window, so the owner thread talks
+// to it with PostThreadMessage.
+constexpr UINT kMsgReRegister = WM_APP + 0x101;
+constexpr UINT kMsgSetLowLevel = WM_APP + 0x102;
+
+// How long the owner thread waits for the input thread before giving up. Both
+// operations are a handful of microsecond-scale Win32 calls, so a timeout only
+// fires when the thread is wedged, and then returning beats hanging the UI.
+constexpr auto kHandshakeTimeout = std::chrono::seconds(2);
+
+// The app owns exactly one InputThread (app/app_host.h) and the frozen class
+// layout has no room for a cross-thread channel, so the hand-off between the
+// owner thread and the input thread lives here. Every field is guarded by
+// g_channel_mutex; nothing else in the process may reference them.
+std::mutex g_channel_mutex;
+std::condition_variable g_channel_cv;
+bool g_queue_ready = false;
+std::array<HotkeyChord, kHotkeyCount> g_requested_chords{};
+std::vector<HotkeyAction> g_requested_conflicts;
+bool g_reregister_request = false;
+bool g_ll_request = false;
+bool g_ll_want = false;
+bool g_ll_result = false;
+bool g_strict_compat = false;
+std::optional<RectPx> g_requested_zone;
+Px g_requested_band = 0;
+bool g_requested_edge_enabled = false;
+bool g_edge_request = false;
+
+// Written by register_all and read by the keyboard hook. Both run on the input
+// thread — WH_KEYBOARD_LL callbacks are delivered to the thread that installed
+// the hook — so the hook can consult this table without taking a lock, which is
+// what keeps it from ever blocking the keyboard.
+std::array<HotkeyChord, kHotkeyCount> g_ll_chords{};
+std::array<HotkeyAction, kHotkeyCount> g_ll_actions{};
+std::size_t g_ll_chord_count = 0;
+UINT_PTR g_edge_timer = 0;
+
+int hotkey_id_for(std::size_t index) noexcept {
+    return kHotkeyBaseId + static_cast<int>(index);
+}
+
+std::uint64_t qpc_now() noexcept {
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<std::uint64_t>(counter.QuadPart);
+}
+
+void publish_payload(BoundedEventBus& bus, Payload payload) noexcept {
+    AppEvent event = AppEvent::make(std::move(payload));
+    event.timestamp_qpc = qpc_now();
+    event.source_thread = static_cast<std::uint32_t>(GetCurrentThreadId());
+    bus.publish(event);
+}
+
+// Exact modifier match, the same rule RegisterHotKey applies: a chord bound to
+// Ctrl+M must not also fire for Ctrl+Alt+M.
+bool chord_modifiers_match(std::uint32_t mask) noexcept {
+    const bool want_ctrl = (mask & MOD_CONTROL) != 0;
+    const bool want_alt = (mask & MOD_ALT) != 0;
+    const bool want_shift = (mask & MOD_SHIFT) != 0;
+    const bool want_win = (mask & MOD_WIN) != 0;
+
+    const bool have_ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool have_alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool have_shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool have_win = ((GetAsyncKeyState(VK_LWIN) | GetAsyncKeyState(VK_RWIN)) & 0x8000) != 0;
+
+    return have_ctrl == want_ctrl && have_alt == want_alt && have_shift == want_shift &&
+           have_win == want_win;
+}
+
+}  // namespace
+
+InputThread* InputThread::ll_owner_ = nullptr;
+
+InputThread::InputThread(BoundedEventBus& bus) : bus_(bus) {}
+
+InputThread::~InputThread() {
+    stop();
+}
+
+bool InputThread::start(const std::array<HotkeyChord, kHotkeyCount>& chords, bool strict_compat) {
+    if (running_.load()) return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chords_ = chords;
+        registered_.clear();
+        report_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_strict_compat = strict_compat;
+        g_queue_ready = false;
+        g_reregister_request = false;
+        g_ll_request = false;
+        g_edge_request = false;
+    }
+    running_.store(true);
+    try {
+        thread_ = std::thread(&InputThread::thread_main, this);
+    } catch (...) {
+        running_.store(false);
+        return false;
+    }
+    // thread_id_ is written once by the input thread before it publishes
+    // g_queue_ready, so this acquire makes the id safe to read.
+    std::unique_lock<std::mutex> lock(g_channel_mutex);
+    g_channel_cv.wait_for(lock, kHandshakeTimeout, [] { return g_queue_ready; });
+    return true;
+}
+
+void InputThread::stop() {
+    const bool was_running = running_.exchange(false);
+    if (thread_.joinable()) {
+        if (was_running) {
+            std::unique_lock<std::mutex> lock(g_channel_mutex);
+            // PostThreadMessage must not race the queue creation, or WM_QUIT
+            // is lost and the thread stays blocked in GetMessage forever.
+            g_channel_cv.wait_for(lock, kHandshakeTimeout, [] { return g_queue_ready; });
+            if (thread_id_ != 0) PostThreadMessageW(thread_id_, WM_QUIT, 0, 0);
+        }
+        thread_.join();
+    }
+    // The input thread released its own registrations on the way out; repeating
+    // it here (harmlessly failing for a thread that never ran) means a half
+    // started session can never leak a global hotkey.
+    unregister_all();
+    ll_enabled_.store(false);
+    if (ll_hook_ != nullptr) {
+        UnhookWindowsHookEx(ll_hook_);
+        ll_hook_ = nullptr;
+    }
+    thread_id_ = 0;
+}
+
+void InputThread::set_hotkeys(const std::array<HotkeyChord, kHotkeyCount>& chords,
+                              std::vector<HotkeyAction>& out_conflicts) {
+    out_conflicts.clear();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chords_ = chords;
+    }
+    if (!running_.load() || thread_id_ == 0) return;  // nothing to re-register on yet
+
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_requested_chords = chords;
+        g_requested_conflicts.clear();
+        g_reregister_request = true;
+    }
+    if (PostThreadMessageW(thread_id_, kMsgReRegister, 0, 0) == FALSE) {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_reregister_request = false;
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_channel_mutex);
+    g_channel_cv.wait_for(lock, kHandshakeTimeout, [] { return !g_reregister_request; });
+    if (!g_reregister_request) out_conflicts = g_requested_conflicts;
+}
+
+bool InputThread::set_low_level_fallback(bool enabled) {
+    // Strict compatibility mode (design doc §3.3/§6.5) keeps RegisterHotKey as
+    // the only input path; disabling the fallback is still allowed.
+    if (enabled && g_strict_compat) return false;
+    if (!running_.load() || thread_id_ == 0) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_ll_want = enabled;
+        g_ll_result = false;
+        g_ll_request = true;
+    }
+    if (PostThreadMessageW(thread_id_, kMsgSetLowLevel, 0, 0) == FALSE) {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_ll_request = false;
+        return false;
+    }
+    std::unique_lock<std::mutex> lock(g_channel_mutex);
+    g_channel_cv.wait_for(lock, kHandshakeTimeout, [] { return !g_ll_request; });
+    return !g_ll_request && g_ll_result;
+}
+
+void InputThread::set_strict_compat(bool strict) {
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_strict_compat = strict;
+    }
+    // Turning it on has to take the hook down with it, or the flag would say one
+    // thing and the keyboard would do another. Turning it off does not put the
+    // hook back: whether it is wanted depends on which chords are still in
+    // conflict, and the caller re-registers straight afterwards anyway.
+    if (strict) set_low_level_fallback(false);
+}
+
+void InputThread::set_edge_zone(std::optional<RectPx> zone_px, Px band_px, bool enabled) {
+    std::lock_guard<std::mutex> lock(g_channel_mutex);
+    // Applied by poll_cursor on the next tick; the owner thread must not touch
+    // the detector state directly (the header reserves it for this thread).
+    g_requested_zone = zone_px;
+    g_requested_band = band_px;
+    g_requested_edge_enabled = enabled;
+    g_edge_request = true;
+}
+
+std::string InputThread::registration_report() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (report_.empty()) return std::string("all bound hotkeys registered");
+    return report_;
+}
+
+void InputThread::register_all(const std::array<HotkeyChord, kHotkeyCount>& chords,
+                               std::vector<HotkeyAction>& out_conflicts) {
+    unregister_all();
+    out_conflicts.clear();
+
+    std::vector<HotkeyAction> accepted;
+    std::string report;
+    std::array<HotkeyChord, kHotkeyCount> fallback{};
+    std::array<HotkeyAction, kHotkeyCount> fallback_actions{};
+    std::size_t fallback_count = 0;
+
+    for (std::size_t i = 0; i < kHotkeyCount; ++i) {
+        const HotkeyChord chord = chords[i];
+        if (!chord_is_bound(chord)) continue;
+        const auto action = static_cast<HotkeyAction>(i);
+
+        if (RegisterHotKey(nullptr, hotkey_id_for(i), chord.modifiers | MOD_NOREPEAT,
+                           chord.virtual_key) != FALSE) {
+            accepted.push_back(action);
+            continue;
+        }
+        const DWORD error = GetLastError();
+        out_conflicts.push_back(action);
+        // A chord RegisterHotKey refused is exactly what the low-level fallback
+        // is for. Only those chords go into the hook table: a chord both paths
+        // handled would publish HotkeyPressed twice, and the low-level hook
+        // would swallow a key the shell already delivered to us.
+        if (fallback_count < fallback.size()) {
+            fallback[fallback_count] = chord;
+            fallback_actions[fallback_count] = action;
+            ++fallback_count;
+        }
+        report += describe_chord(chord);
+        report += " (";
+        report += hotkey_action_name(action);
+        report += ") ";
+        if (error == ERROR_HOTKEY_ALREADY_REGISTERED) {
+            report += "is already registered by another application";
+        } else {
+            report += "failed to register, error ";
+            report += std::to_string(static_cast<unsigned long>(error));
+        }
+        report += '\n';
+    }
+
+    g_ll_chords = fallback;
+    g_ll_actions = fallback_actions;
+    g_ll_chord_count = fallback_count;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    registered_ = std::move(accepted);
+    report_ = std::move(report);
+}
+
+void InputThread::unregister_all() {
+    for (std::size_t i = 0; i < kHotkeyCount; ++i) {
+        UnregisterHotKey(nullptr, hotkey_id_for(i));
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    registered_.clear();
+}
+
+void InputThread::thread_main() {
+    thread_id_ = GetCurrentThreadId();
+    ll_owner_ = this;
+
+    // Creating the queue before announcing readiness is what makes the owner
+    // thread's PostThreadMessage safe from then on.
+    MSG probe{};
+    PeekMessageW(&probe, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_queue_ready = true;
+    }
+    g_channel_cv.notify_all();
+
+    std::array<HotkeyChord, kHotkeyCount> chords{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        chords = chords_;
+    }
+    std::vector<HotkeyAction> ignored_conflicts;
+    register_all(chords, ignored_conflicts);
+
+    g_edge_timer = SetTimer(nullptr, kEdgeTimerId, kEdgePollMs, nullptr);
+
+    MSG msg{};
+    while (running_.load(std::memory_order_relaxed)) {
+        const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got == 0 || got == -1) break;  // WM_QUIT
+
+        switch (msg.message) {
+            case WM_HOTKEY: {
+                const int id = static_cast<int>(msg.wParam);
+                const int base = kHotkeyBaseId;
+                if (id >= base && id < base + static_cast<int>(kHotkeyCount)) {
+                    const auto action = static_cast<HotkeyAction>(id - base);
+                    publish_payload(bus_, HotkeyPressed{static_cast<std::uint32_t>(action)});
+                }
+                break;
+            }
+            case kMsgReRegister: {
+                std::array<HotkeyChord, kHotkeyCount> next{};
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    next = g_requested_chords;
+                }
+                std::vector<HotkeyAction> conflicts;
+                register_all(next, conflicts);
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    g_requested_conflicts = std::move(conflicts);
+                    g_reregister_request = false;
+                }
+                g_channel_cv.notify_all();
+                break;
+            }
+            case kMsgSetLowLevel: {
+                bool want = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    want = g_ll_want;
+                }
+                bool result = false;
+                if (want && !g_strict_compat) {
+                    if (ll_hook_ == nullptr) {
+                        // A low-level hook must be installed by the thread that
+                        // pumps messages, which is this one.
+                        ll_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, &InputThread::ll_keyboard_proc,
+                                                     GetModuleHandleW(nullptr), 0);
+                    }
+                    result = ll_hook_ != nullptr;
+                    ll_enabled_.store(result);
+                } else {
+                    ll_enabled_.store(false);
+                    if (ll_hook_ != nullptr) {
+                        UnhookWindowsHookEx(ll_hook_);
+                        ll_hook_ = nullptr;
+                    }
+                    result = true;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    g_ll_result = result;
+                    g_ll_request = false;
+                }
+                g_channel_cv.notify_all();
+                break;
+            }
+            case WM_TIMER: {
+                if (msg.wParam == static_cast<WPARAM>(g_edge_timer)) poll_cursor();
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    if (g_edge_timer != 0) {
+        KillTimer(nullptr, g_edge_timer);
+        g_edge_timer = 0;
+    }
+    unregister_all();
+    ll_enabled_.store(false);
+    if (ll_hook_ != nullptr) {
+        UnhookWindowsHookEx(ll_hook_);
+        ll_hook_ = nullptr;
+    }
+    ll_owner_ = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_queue_ready = false;
+    }
+}
+
+void InputThread::poll_cursor() {
+    bool zone_changed = false;
+    bool reported_stay = false;
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        if (g_edge_request) {
+            zone_changed = true;
+            reported_stay = edge_inside_ && edge_fired_;
+            g_edge_request = false;
+            edge_zone_px_ = g_requested_zone;
+            edge_band_px_ = g_requested_band > 0 ? g_requested_band : 1;
+            edge_enabled_ = g_requested_edge_enabled && edge_zone_px_.has_value() &&
+                            !is_empty(*edge_zone_px_);
+            edge_inside_ = false;
+            edge_fired_ = false;
+            edge_since_ms_ = 0;
+        }
+    }
+    if (!zone_changed && (!edge_enabled_ || !edge_zone_px_.has_value())) return;
+
+    POINT raw{};
+    if (GetCursorPos(&raw) == FALSE) return;
+    const PointPx cursor{raw.x, raw.y};
+
+    if (zone_changed) {
+        // A new zone ends whatever stay was in progress. If the state machine
+        // was already told about that stay it has to be told it ended too,
+        // otherwise it would keep waiting on a border that no longer exists.
+        if (reported_stay) publish_payload(bus_, CursorSampled{cursor, 0});
+        return;
+    }
+
+    const RectPx zone = *edge_zone_px_;
+    const Px band = edge_band_px_;
+
+    const bool inside_zone = cursor.x >= zone.left && cursor.x < zone.right &&
+                             cursor.y >= zone.top && cursor.y < zone.bottom;
+    const bool on_border = inside_zone &&
+                           (cursor.x - zone.left < band || zone.right - cursor.x <= band ||
+                            cursor.y - zone.top < band || zone.bottom - cursor.y <= band);
+    const std::uint64_t now = GetTickCount64();
+
+    if (on_border) {
+        if (!edge_inside_) {
+            edge_inside_ = true;
+            edge_fired_ = false;
+            edge_since_ms_ = now;
+            // Nothing is published on the entry tick: the state machine reads a
+            // zero dwell as "the cursor left the edge", so a fresh stay must
+            // not start by reporting one.
+            return;
+        }
+        // An absolute dwell, not a delta: a dropped event cannot corrupt the
+        // state machine's notion of how long the cursor has been parked.
+        publish_payload(bus_, CursorSampled{cursor, now - edge_since_ms_});
+        edge_fired_ = true;
+        return;
+    }
+    if (edge_inside_) {
+        // Leaving the band is reported explicitly; a zero dwell is the only
+        // signal that lets the state machine fall back to PassThrough.
+        edge_inside_ = false;
+        edge_fired_ = false;
+        edge_since_ms_ = 0;
+        publish_payload(bus_, CursorSampled{cursor, 0});
+    }
+}
+
+LRESULT CALLBACK InputThread::ll_keyboard_proc(int code, WPARAM wparam, LPARAM lparam) {
+    InputThread* self = ll_owner_;
+    if (code == HC_ACTION && self != nullptr &&
+        self->ll_enabled_.load(std::memory_order_relaxed)) {
+        const DWORD event = static_cast<DWORD>(wparam);
+        if ((event == WM_KEYDOWN || event == WM_SYSKEYDOWN) && g_ll_chord_count != 0) {
+            const auto* info = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
+            for (std::size_t i = 0; i < g_ll_chord_count; ++i) {
+                const HotkeyChord& chord = g_ll_chords[i];
+                if (info->vkCode != chord.virtual_key) continue;
+                if (!chord_modifiers_match(chord.modifiers)) continue;
+                const auto action = g_ll_actions[i];
+                publish_payload(self->bus_, HotkeyPressed{static_cast<std::uint32_t>(action)});
+                // A nonzero return is what swallows the keystroke: the system
+                // stops the chain and no window receives it.
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+}  // namespace mag

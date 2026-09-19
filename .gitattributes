@@ -1,0 +1,10 @@
+# Keep the shell scripts LF. Git Bash chokes on a CR in the shebang line, and
+# this project is developed on a machine where the default is CRLF.
+* text=auto
+*.sh text eol=lf
+
+# Not text: nothing here benefits from a diff, and git should not try.
+*.png binary
+*.ico binary
+*.exe binary
+*.zip binary
