@@ -359,10 +359,15 @@ pretending otherwise:
 * Cross-monitor selections are supported by the renderer, but the development machine has a single
   monitor, so that path has not been exercised against real hardware.
 * Strict compatibility mode (settings window) drops the low-level keyboard fallback and keeps only
-  `RegisterHotKey`. The fallback is off by default in any case.
+  `RegisterHotKey`. The fallback is otherwise used only for chords another application already owns,
+  so a hotkey never silently does nothing.
 
 ## Configuration
 
 `%APPDATA%\Magnifier\config.json`, written atomically on every change. Hand-editing it is fine; every
 field is clamped into its documented range on load, and an unusable file is replaced with defaults
 with a note in the status line. `language` is `"zh"` or `"en"`.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
