@@ -6,7 +6,7 @@ _Last updated: 2026-09-19, after the viewport-and-rebind revision._
 
 The application is **built, packaged and verified**. `./build.sh package` produces
 `dist/ScreenMagnifier.exe` (1.3 MB, icon and manifest embedded, no runtime DLLs) and
-`dist/ScreenMagnifier-1.0.0.zip` (0.5 MB, the executable plus a Chinese readme) — the second is what
+`dist/ScreenMagnifier-1.0.1.zip` (0.5 MB, the executable plus a Chinese readme) — the second is what
 gets sent to someone.
 
 ```
