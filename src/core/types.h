@@ -205,8 +205,9 @@ struct SelectionConfig {
 struct MagnificationConfig {
     Q16 factor_q16{kQ16One};
     SizePx output_size_px{320, 240};
-    // When true the source is letterboxed inside the window instead of being
-    // stretched, so extreme window aspect ratios never distort the content.
+    // Keeps the window's proportions when the size slider is dragged. The scale
+    // itself is always the factor -- see compute_viewport() -- so this no longer
+    // decides how the source is fitted.
     bool keep_aspect_ratio{true};
 
     friend constexpr bool operator==(const MagnificationConfig&, const MagnificationConfig&) = default;

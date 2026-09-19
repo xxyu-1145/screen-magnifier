@@ -10,22 +10,21 @@
 
 namespace mag {
 
-// How the (scaled) source content is placed inside the output window.
+// How the source content is placed inside the output window.
 //
-// Both modes scale uniformly, so the picture is never distorted. They differ
-// only in what happens when the window aspect ratio does not match the source
-// aspect ratio:
-//   * contain (keep_aspect_ratio == true) — the whole source stays visible and
-//     the leftover area is filled with the background. This is the documented
-//     default for extreme window shapes.
-//   * cover   (keep_aspect_ratio == false) — the window is filled and the
-//     overflow is cropped. Only reachable when the user turns the ratio lock
-//     off, which is exactly what the design doc permits.
+// The scale is always the configured factor: the window is a viewport onto the
+// magnified desktop, not something the picture is stretched to fill. That is
+// what keeps the factor box honest -- resizing the window changes how much is
+// in view, never how big it is. Everything is uniform, so the picture is never
+// distorted.
 struct ViewportMapping {
     RectPx dest_rect_px{};      // in client coords, origin (0,0)
-    RectPx src_sub_rect_px{};   // source-relative; (0,0) == selection top-left
+    // The source window that fills the client at this scale, relative to the
+    // selection's top-left. It is usually *not* the selection: it goes negative
+    // when the window reaches past the selection's left/top edge, and wider than
+    // the selection when the window shows desktop beside it.
+    RectPx src_sub_rect_px{};
     Q16 applied_scale_q16{kQ16One};
-    bool letterboxed{false};
     bool valid{false};
 };
 

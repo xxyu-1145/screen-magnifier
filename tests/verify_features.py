@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 EXE = ROOT / "build" / "magnifier.exe"
 CONFIG = Path(os.environ.get("APPDATA", "")) / "Magnifier" / "config.json"
+OUT = ROOT / "build" / "features"
 
 u = ctypes.WinDLL("user32", use_last_error=True)
 k = ctypes.WinDLL("kernel32")
@@ -134,6 +135,26 @@ def find_child(pid, ctrl_id):
     if h:
         u.EnumChildWindows(h, cb, 0)
     return found[0] if found else None
+
+
+def take_foreground(hwnd):
+    """Bring a window forward the way a user does: by clicking it.
+
+    SetForegroundWindow from a process that is not itself the foreground one is
+    refused, and the refusal is silent -- the keystrokes then go to whatever
+    window does hold the foreground, which reads as the program ignoring them.
+    That is why the older checks here SKIPped every so often, and why a real
+    click is worth the two extra lines: it is always granted.
+    """
+    r = wt.RECT()
+    u.GetWindowRect(hwnd, ctypes.byref(r))
+    u.SetCursorPos(r.left + 40, r.top + 8)
+    time.sleep(0.2)
+    u.mouse_event(0x0002, 0, 0, 0, 0)
+    time.sleep(0.05)
+    u.mouse_event(0x0004, 0, 0, 0, 0)
+    time.sleep(0.4)
+    return u.GetForegroundWindow() == hwnd
 
 
 def find_child_by_class(pid, cls):
@@ -363,6 +384,10 @@ def main() -> int:
                 time.sleep(1.5)
                 after = crop()
                 back.destroy()
+                # Kept so a mismatch can be looked at rather than guessed about.
+                OUT.mkdir(parents=True, exist_ok=True)
+                before.save(OUT / "offon_before.png")
+                after.save(OUT / "offon_after.png")
 
                 def mean_abs_diff(a, b):
                     pa, pb = a.load(), b.load()
@@ -415,8 +440,7 @@ def main() -> int:
             # The keystrokes go wherever the focus is, so make sure that is the
             # field before typing into it and give up rather than type into
             # whatever else happens to be in front.
-            u.SetForegroundWindow(settings)
-            time.sleep(0.6)
+            take_foreground(settings)
             r = wt.RECT()
             u.GetClientRect(field, ctypes.byref(r))
             u.SendMessageW(field, 0x0201, 0x0001, 0)      # click to focus
@@ -554,6 +578,12 @@ def main() -> int:
         else:
             x0, y0, x1, y1 = ov[0][2]
             drag_x, drag_y = (x0 + x1) // 2, (y0 + y1) // 2
+            # A drag that does nothing is either the window refusing to move or
+            # the input never reaching it, and the status line says which: it
+            # reports the state machine's state, and a click-through window is
+            # the one case where a press at its middle goes to whatever is
+            # underneath instead.
+            print(f"    before the drag: {status_line(p.pid)}")
             u.SetCursorPos(drag_x, drag_y)
             time.sleep(0.4)
             u.mouse_event(0x0002, 0, 0, 0, 0)          # LEFTDOWN
@@ -630,6 +660,32 @@ def main() -> int:
                 print("    FAIL: the slider did not resize in place")
                 failures += 1
 
+            # And the way back: "fit to source" is the window shape that shows
+            # the whole region and nothing else, so it is a size the factor
+            # already implies. The button sends an empty size for it, which the
+            # resize range check used to reject -- so it did nothing at all.
+            fit_button = find_child(p.pid, 1033)
+            if fit_button is None:
+                print("    FAIL: the fit-to-source button was not found")
+                failures += 1
+            else:
+                u.SendMessageW(fit_button, 0x00F5, 0, 0)      # BM_CLICK
+                time.sleep(1.8)
+                m = re.search(r"选区\s+(\d+)x(\d+)", status_line(p.pid))
+                factor = saved_factor()
+                vw, vh = u.GetSystemMetrics(78), u.GetSystemMetrics(79)
+                want = ((min(int(int(m.group(1)) * factor), vw),
+                         min(int(int(m.group(2)) * factor), vh)) if m else None)
+                got = window_rect()
+                got_size = (got[2] - got[0], got[3] - got[1]) if got else None
+                print(f"    适配选区 resizes the window to {got_size} (the region at "
+                      f"{factor:g}x is {want})")
+                if want is not None and got_size == want:
+                    print("    PASS: it fits the window to the region at the current factor")
+                else:
+                    print("    FAIL: fit to source did not restore the full region")
+                    failures += 1
+
         # --- 12. the preset factors can be typed ---------------------------
         #
         # The button jumps to the preset; the field under it says what the
@@ -659,8 +715,7 @@ def main() -> int:
 
             was = button_text(preset_button)
             settings = win(p.pid)
-            u.SetForegroundWindow(settings)
-            time.sleep(0.6)
+            take_foreground(settings)
             click(preset_field)
             time.sleep(0.4)
             u.SendMessageW(preset_field, 0x00B1, 0, -1)     # EM_SETSEL: all
@@ -727,6 +782,113 @@ def main() -> int:
             else:
                 print("    FAIL: recalling a kept region did not restore it")
                 failures += 1
+
+        # --- 14. the language switch repaints, leaving nothing behind -------
+        #
+        # Owner-drawn controls compose into a bitmap and blit it whole. One that
+        # paints only what it draws leaves the previous pixels alone, so the new
+        # label lands on top of the old one -- which is how the English
+        # interface came up with its checkboxes reading English *and* Chinese at
+        # once. A screenshot cannot tell "correct" from "correct with leftovers"
+        # by itself, so the comparison is against a fresh paint of the same
+        # thing: relaunching, which comes up in the language just chosen.
+        print("\n[14] switching language leaves nothing of the old one behind")
+        try:
+            from PIL import ImageGrab
+        except ImportError as ex:  # noqa: BLE001
+            print(f"    SKIP: {ex}")
+        else:
+            if windows(p.pid, "MagOverlayWindow") and \
+                    windows(p.pid, "MagOverlayWindow")[0][1]:
+                press(p.pid, TOGGLE)                 # out of the way of the crop
+
+            def row_box():
+                """Screen rect covering the captions of the two checkbox rows.
+
+                Anchored at each control's own left edge and cut to a fixed
+                width: the caption starts there in both runs, while the control
+                itself is only as wide as its label needs, and a switched layout
+                need not hand it the same width a fresh one does.
+                """
+                rects = []
+                for ctrl in (1220, 1221):            # exclude capture, show border
+                    h = find_child(p.pid, ctrl)
+                    if h is None:
+                        return None
+                    r = wt.RECT()
+                    u.GetWindowRect(h, ctypes.byref(r))
+                    rects.append((r.left, r.top, r.right, r.bottom))
+                left = min(r[0] for r in rects)
+                return (left, min(r[1] for r in rects), left + 300,
+                        max(r[3] for r in rects))
+
+            box = row_box()
+            english = find_child(p.pid, 201)
+            if box is None or english is None:
+                print("    FAIL: the language toggle or the checkbox rows were not found")
+                failures += 1
+            else:
+                u.SendMessageW(english, 0x00F5, 0, 0)   # BM_CLICK
+                time.sleep(2.0)
+                switched = child_texts(p.pid)
+                left = [t for t in switched
+                        if any('一' <= c <= '鿿' for c in t) and t != "中文"]
+                after = ImageGrab.grab(bbox=box, all_screens=True).convert("RGB")
+                spill = escaped_controls()
+                print(f"    after the switch: {len(left)} labels still in Chinese {left[:2]}; "
+                      f"controls outside the client area: {len(spill)}")
+
+                # Restart: the app comes up in English and paints these rows once.
+                press(p.pid, QUIT, settle=1.0)
+                try:
+                    p.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                p = subprocess.Popen([str(EXE)], cwd=str(ROOT))
+                for _ in range(80):
+                    time.sleep(0.25)
+                    if windows(p.pid, "MagControlWindow"):
+                        break
+                time.sleep(2.5)
+                fresh_box = row_box()
+                if fresh_box is None:
+                    print("    FAIL: the checkbox rows were not found after the restart")
+                    failures += 1
+                else:
+                    fresh = ImageGrab.grab(bbox=fresh_box, all_screens=True).convert("RGB")
+                    if fresh.size != after.size:
+                        fresh = fresh.resize(after.size)
+                    # Kept so a mismatch can be looked at rather than guessed
+                    # about: the switched window beside one painted in that
+                    # language from the start.
+                    OUT.mkdir(parents=True, exist_ok=True)
+                    after.save(OUT / "language_switched.png")
+                    fresh.save(OUT / "language_fresh.png")
+                    pa, pb = after.load(), fresh.load()
+                    step = max(1, min(after.width, after.height) // 40)
+                    total = n = 0
+                    for y in range(0, after.height, step):
+                        for x in range(0, after.width, step):
+                            ca, cb = pa[x, y], pb[x, y]
+                            total += abs(ca[0]-cb[0]) + abs(ca[1]-cb[1]) + abs(ca[2]-cb[2])
+                            n += 3
+                    diff = total / max(n, 1)
+                    print(f"    against a fresh paint of the same labels: "
+                          f"{diff:.2f} per channel")
+                    if len(left) > 0:
+                        print("    FAIL: a label did not follow the language")
+                        failures += 1
+                    elif spill:
+                        print(f"    FAIL: the switched layout pushed controls out of view: "
+                              f"{spill[:4]}")
+                        failures += 1
+                    elif diff > 3.0:
+                        # Leftover glyphs make the switched window differ from
+                        # one that was painted in that language from the start.
+                        print("    FAIL: the window kept pixels of the old language")
+                        failures += 1
+                    else:
+                        print("    PASS: the interface is in one language, freshly painted")
 
         press(p.pid, QUIT, settle=1.0)
         try:

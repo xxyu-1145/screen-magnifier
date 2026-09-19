@@ -39,7 +39,14 @@ struct AppConfig {
 
     // --- magnification ---
     Q16 factor_q16{kQ16One * 4};  // 4x out of the box
-    SizePx output_size_px{640, 480};
+    // The shipped window is the shipped region at the shipped factor (320x240
+    // at 4x). The window is a viewport at the configured factor, so a size that
+    // does not match would show only part of the region the moment the program
+    // starts -- the factor box would be right and the picture would not.
+    SizePx output_size_px{1280, 960};
+    // Keeps the window's own proportions while the size slider is dragged. It no
+    // longer selects a fit policy: the scale is the factor either way, so the
+    // only thing an extreme window shape can change is how much is in view.
     bool keep_aspect_ratio{true};
     std::array<Q16, kPresetCount> presets{
         kQ16One * 2, kQ16One * 4, kQ16One * 8, kQ16One * 10};

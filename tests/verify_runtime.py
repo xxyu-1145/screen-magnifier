@@ -144,6 +144,21 @@ def status(pid: int) -> str:
     return out[0] if out else ""
 
 
+def find_child(pid: int, ctrl_id: int):
+    """The settings window's child with this control id, whatever its class."""
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(h, _):
+        if u.GetDlgCtrlID(h) == ctrl_id:
+            found.append(h)
+        return True
+
+    for h, _, _, _ in find(pid, "MagControlWindow"):
+        u.EnumChildWindows(h, cb, 0)
+    return found[0] if found else None
+
+
 def state_of(st: str) -> str:
     """The interaction state, whichever language the interface is in."""
     if "鼠标穿透" in st or "click-through" in st:
@@ -453,6 +468,115 @@ def main() -> int:
                 p2.terminate()
             u.UnregisterHotKey(None, HOTKEY_ID)
 
+    # --- a chord the program already owns can be rebound ---------------------
+    #
+    # Two separate faults made rebinding look broken, and neither was visible in
+    # the field: pressing Ctrl committed a chord of its own (the keystroke for
+    # Ctrl arrives with Ctrl already down, so the capture ended on "Ctrl+VK_11"
+    # before the letter was ever reached), and a chord the program holds is
+    # consumed by RegisterHotKey, so it never reached the field -- the action it
+    # already belonged to fired instead. Both are checked here by typing a chord
+    # the app owns into a field and requiring the new binding to come out, the
+    # old registration to be released while the field is armed, and everything
+    # to be back in force afterwards.
+    def click_to_foreground(hwnd) -> bool:
+        """Bring a window forward the way a user does: by clicking it.
+
+        SetForegroundWindow from a process that is not itself in the foreground
+        is refused, and a refused call is silent -- the keystrokes then land in
+        whatever window does hold it, which reads as the program ignoring them.
+        A real click is always granted.
+        """
+        r = wt.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        u.SetCursorPos(r.left + 40, r.top + 8)
+        time.sleep(0.2)
+        u.mouse_event(0x0002, 0, 0, 0, 0)
+        time.sleep(0.05)
+        u.mouse_event(0x0004, 0, 0, 0, 0)
+        time.sleep(0.4)
+        return u.GetForegroundWindow() == hwnd
+
+    def field_text(hwnd) -> str:
+        buf = ctypes.create_unicode_buffer(256)
+        u.SendMessageW.restype = ctypes.c_ssize_t
+        u.SendMessageW.argtypes = [wt.HWND, wt.UINT, ctypes.c_size_t, ctypes.c_void_p]
+        u.SendMessageW(hwnd, 0x000D, 256, buf)      # WM_GETTEXT
+        return buf.value
+
+    def click_control(hwnd) -> None:
+        u.SendMessageW.restype = ctypes.c_ssize_t
+        u.SendMessageW.argtypes = [wt.HWND, wt.UINT, ctypes.c_size_t, ctypes.c_void_p]
+        u.SendMessageW(hwnd, 0x0201, 1, None)       # WM_LBUTTONDOWN
+        u.SendMessageW(hwnd, 0x0202, 0, None)       # WM_LBUTTONUP
+
+    if CONFIG.exists():
+        CONFIG.unlink()
+    p3 = subprocess.Popen([str(EXE)], cwd=str(ROOT))
+    try:
+        for _ in range(80):
+            time.sleep(0.25)
+            if find(p3.pid, "MagControlWindow"):
+                break
+        time.sleep(2.0)
+
+        settings = find(p3.pid, "MagControlWindow")[0][0]
+        foreground = click_to_foreground(settings)
+        owns_m = lambda: owns_hotkey(MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_M)  # noqa: E731
+        owned_before = owns_m()
+        was_hidden = overlay_visible(p3.pid) is None
+
+        # ShrinkWidth is the "narrower" action; give it the chord Ctrl+Alt+M that
+        # Show/hide currently owns.
+        field_hwnd = find_child(p3.pid, 1100 + ACTION["ShrinkWidth"])
+        clicked = field_hwnd is not None
+        armed_text = ""
+        released = False
+        hinted = False
+        if clicked:
+            click_control(field_hwnd)
+            time.sleep(0.6)
+            armed_text = field_text(field_hwnd)
+            released = not owns_m()
+            tap(0x4A)                       # a bare 'J': refused, and said so
+            time.sleep(0.8)
+            hinted = field_text(field_hwnd) not in ("", armed_text)
+
+        tap(0xA2)                           # LCtrl
+        tap(0xA4)                           # LAlt
+        tap(VK_M)
+        tap(VK_M, up=True)
+        tap(0xA4, up=True)
+        tap(0xA2, up=True)
+        time.sleep(1.8)
+
+        stored = None
+        try:
+            stored = json.loads(CONFIG.read_text(encoding="utf-8"))["hotkeys"]["ShrinkWidth"]
+        except Exception:  # noqa: BLE001
+            pass
+        rebound = stored == [MOD_CONTROL | MOD_ALT, VK_M]
+        owns_after = owns_m()
+        still_hidden = overlay_visible(p3.pid) is None
+
+        rep.add("a chord the program already owns can be rebound",
+                foreground and owned_before and clicked and released and rebound
+                and owns_after and was_hidden and still_hidden,
+                f"foreground={foreground} owned={owned_before} field={clicked} "
+                f"released while armed={released} rebound={stored} "
+                f"re-registered={owns_after}, the old action stayed put={still_hidden}")
+        rep.add("a key that needs a modifier is refused, and says so",
+                hinted, f"the field went from {armed_text!r} to a refusal notice")
+
+        press(p3.pid, "Quit")
+        try:
+            p3.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            p3.terminate()
+    finally:
+        if p3.poll() is None:
+            p3.terminate()
+
     print("\n" + "=" * 74)
     total = len(rep.checks)
     print(f"{total - rep.failures}/{total} checks passed")
@@ -463,7 +587,6 @@ def main() -> int:
                 print(f"  - {name}: {detail}")
     print("=" * 74)
     return rep.failures
-
 
 if __name__ == "__main__":
     sys.exit(main())

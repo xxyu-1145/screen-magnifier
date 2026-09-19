@@ -747,19 +747,23 @@ struct RenderService::Impl {
         const RectPx dest = vp_mapping.dest_rect_px;
         if (is_empty(visible_src) || is_empty(dest)) return;
 
-        // Where the whole selection shape lands in client space. Tiles only
-        // fill part of it when the window is in cover mode, which is fine: the
-        // mask is evaluated everywhere and simply has nothing to show outside.
+        // Where the selection shape lands in client space. The viewport may show
+        // desktop outside the selection, and the mask has to cover that too --
+        // otherwise a rectangle selection would leave its own window transparent
+        // around the edges -- so it is grown to the client rect around the
+        // selection's centre. A window smaller than the selection keeps the
+        // selection's own extent, which is what makes it crop rather than clip
+        // the shape: a circle stays a circle and the window is simply inside it.
         const Q16 scale = vp_mapping.applied_scale_q16;
-        const RectPx mask_client{
-            dest.left - scale_px(vp_mapping.src_sub_rect_px.left, scale),
-            dest.top - scale_px(vp_mapping.src_sub_rect_px.top, scale),
-            0,
-            0,
-        };
-        RectPx mask_rect = mask_client;
-        mask_rect.right = mask_rect.left + scale_px(width_of(sel), scale);
-        mask_rect.bottom = mask_rect.top + scale_px(height_of(sel), scale);
+        const Px sel_w = scale_px(width_of(sel), scale);
+        const Px sel_h = scale_px(height_of(sel), scale);
+        const Px sel_left = dest.left - scale_px(vp_mapping.src_sub_rect_px.left, scale);
+        const Px sel_top = dest.top - scale_px(vp_mapping.src_sub_rect_px.top, scale);
+        const Px mask_w = std::max<Px>(sel_w, width_of(dest));
+        const Px mask_h = std::max<Px>(sel_h, height_of(dest));
+        const Px mask_left = sel_left + sel_w / 2 - mask_w / 2;
+        const Px mask_top = sel_top + sel_h / 2 - mask_h / 2;
+        const RectPx mask_rect{mask_left, mask_top, mask_left + mask_w, mask_top + mask_h};
 
         bool bicubic = false;
         ID3D11PixelShader* ps = pick_pixel_shader(snap.magnification.factor_q16, bicubic);

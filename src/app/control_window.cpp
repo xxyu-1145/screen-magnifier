@@ -179,6 +179,25 @@ Q16 q16_from_slider_pos(int pos) {
     return static_cast<Q16>((static_cast<unsigned long long>(clamped) * kQ16One + 50ull) / 100ull);
 }
 
+// The keys a chord is *made of* rather than the key it ends on. The message for
+// Ctrl arrives with Ctrl already down, so committing on it produced a
+// "Ctrl+VK_11" binding and ended the capture before the letter was reached.
+bool is_modifier_key(UINT vk) noexcept {
+    switch (vk) {
+        case VK_SHIFT: case VK_CONTROL: case VK_MENU:
+        case VK_LSHIFT: case VK_RSHIFT:
+        case VK_LCONTROL: case VK_RCONTROL:
+        case VK_LMENU: case VK_RMENU:
+        case VK_LWIN: case VK_RWIN:
+        // What an input method sends for a keystroke it has taken for itself;
+        // it carries no key of its own.
+        case VK_PROCESSKEY:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool face_available(HDC dc, const wchar_t* face) {
     HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -391,7 +410,17 @@ void button_set_checked(HWND button, bool checked) {
 }
 
 // Rounded push buttons, segmented toggles and checkboxes, all from one painter.
-void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind, bool checked, bool hovered) {
+//
+// `backdrop` is the colour the surface under the control is painted with. The
+// control composes into a bitmap and blits it whole, and a bitmap that starts
+// transparent leaves whatever was underneath it alone -- which is how switching
+// the language came to draw the English label on top of the Chinese one: the
+// checkbox only paints a box and some text, so the rest of its rectangle was
+// still the previous language. Filling with the colour it is actually sitting
+// on also means the anti-aliased edges of a rounded button blend into the card
+// or the page rather than into whatever the window last showed there.
+void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind, bool checked, bool hovered,
+                  const Gdiplus::Color& backdrop) {
     const Theme& th = theme();
     const int width = dis->rcItem.right - dis->rcItem.left;
     const int height = dis->rcItem.bottom - dis->rcItem.top;
@@ -414,6 +443,9 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind, bool checked, bool
         // surface, which reads as text that is too heavy.
         g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
         g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+
+        SolidBrush under(backdrop);
+        g.FillRectangle(&under, 0, 0, width, height);
 
         const float radius = std::min(11.0f, box.Height * 0.30f);
 
@@ -576,6 +608,41 @@ LRESULT CALLBACK chord_edit_subclass(HWND hwnd, UINT message, WPARAM wparam, LPA
 struct FontPass {
     HFONT font;
 };
+
+Gdiplus::Color mix_colour(const Gdiplus::Color& a, const Gdiplus::Color& b, float t) {
+    t = std::clamp(t, 0.0f, 1.0f);
+    const auto mix = [t](BYTE x, BYTE y) {
+        return static_cast<BYTE>(static_cast<float>(x) +
+                                 (static_cast<float>(y) - static_cast<float>(x)) * t + 0.5f);
+    };
+    return Gdiplus::Color(255, mix(a.GetR(), b.GetR()), mix(a.GetG(), b.GetG()),
+                          mix(a.GetB(), b.GetB()));
+}
+
+// What the parent paints on the surface underneath a control: flat white inside
+// a card or the header row, and the page's own vertical gradient everywhere
+// else. An owner-drawn control that composes into a bitmap has to fill its
+// rectangle with this before it draws, or the bitmap's untouched pixels blit as
+// "leave what was there" and the previous contents stay on screen.
+Gdiplus::Color backdrop_under(HWND hwnd, const RECT* cards, int card_count, const RECT& header,
+                              const RECT& item) {
+    const Theme& th = theme();
+    for (int i = 0; i < card_count; ++i) {
+        const RECT& c = cards[i];
+        if (item.left >= c.left && item.right <= c.right && item.top >= c.top &&
+            item.bottom <= c.bottom) {
+            return th.card;
+        }
+    }
+    if (item.bottom <= header.bottom) return Gdiplus::Color(255, 0xFF, 0xFF, 0xFF);
+
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    if (client.bottom <= 0) return th.page_top;
+    const float middle = static_cast<float>(item.top + item.bottom) * 0.5f;
+    return mix_colour(th.page_top, th.page_bottom,
+                      middle / static_cast<float>(client.bottom));
+}
 
 BOOL CALLBACK apply_font_to_child(HWND child, LPARAM param) {
     const auto* pass = reinterpret_cast<const FontPass*>(param);
@@ -1379,7 +1446,8 @@ LRESULT CALLBACK ControlWindow::wnd_proc(HWND hwnd, UINT message, WPARAM wparam,
                               (id == kIdLangFirst + 1 && cfg_.language == Language::English);
                 }
             }
-            paint_button(dis, kind, checked, s.hover == control);
+            paint_button(dis, kind, checked, s.hover == control,
+                         backdrop_under(hwnd, s.cards, s.card_count, s.header, dis->rcItem));
             return TRUE;
         }
 
@@ -1622,6 +1690,8 @@ void ControlWindow::on_command(int control_id, int notify_code) {
             commit_size_edits();
             return;
         case kIdOutputFit:
+            // An empty size means "the region at the current factor", which is
+            // the window shape that shows all of it and nothing else.
             if (callbacks_.on_output_size_changed) callbacks_.on_output_size_changed(SizePx{0, 0});
             return;
         case kIdKeepAspect:
@@ -1725,11 +1795,17 @@ void ControlWindow::begin_chord_capture(HWND edit) {
     chord_capture_index_ = index;
     SetFocus(edit);
     SetWindowTextW(edit, tr(Str::PressAKey));
+    // Every chord the program owns has to stop being registered while the user
+    // is typing one: RegisterHotKey consumes its own chords, so pressing the one
+    // that is already taken -- which is exactly what someone reassigning a
+    // hotkey does -- fired the action and the field never saw the key at all.
+    if (callbacks_.on_chord_capture) callbacks_.on_chord_capture(true);
 }
 
 void ControlWindow::cancel_chord_capture() {
     if (chord_capture_index_ < 0) return;
     chord_capture_index_ = -1;
+    if (callbacks_.on_chord_capture) callbacks_.on_chord_capture(false);
     refresh_hotkey_labels();
 }
 
@@ -1739,6 +1815,7 @@ void ControlWindow::handle_chord_key(UINT vk) {
         cancel_chord_capture();
         return;
     }
+    if (is_modifier_key(vk)) return;   // wait for the key the chord ends on
 
     const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -1748,7 +1825,17 @@ void ControlWindow::handle_chord_key(UINT vk) {
     // A bare key would swallow that key everywhere; function keys are the one
     // case users expect to be allowed on their own.
     const bool is_function_key = vk >= VK_F1 && vk <= VK_F24;
-    if (!ctrl && !alt && !shift && !win && !is_function_key) return;
+    if (!ctrl && !alt && !shift && !win && !is_function_key) {
+        // Refused, but not silently: a field that ignores the press looks broken
+        // in exactly the way this did. The capture stays armed, so the next key
+        // -- this time with a modifier -- still lands.
+        auto& s = *impl_;
+        if (s.hk_edit[static_cast<std::size_t>(chord_capture_index_)]) {
+            SetWindowTextW(s.hk_edit[static_cast<std::size_t>(chord_capture_index_)],
+                           tr(Str::HotkeyNeedsModifier));
+        }
+        return;
+    }
 
     HotkeyChord chord{};
     if (ctrl) chord.modifiers |= 0x0002;   // MOD_CONTROL
@@ -1758,9 +1845,13 @@ void ControlWindow::handle_chord_key(UINT vk) {
     chord.virtual_key = vk;
 
     std::array<HotkeyChord, kHotkeyCount> next = cfg_.hotkeys;
-    next[static_cast<std::size_t>(chord_capture_index_)] = chord;
+    const std::size_t index = static_cast<std::size_t>(chord_capture_index_);
+    next[index] = chord;
     chord_capture_index_ = -1;
 
+    // Registration comes back before the new table goes in, so the chords are
+    // never left released if the rebind callback does nothing.
+    if (callbacks_.on_chord_capture) callbacks_.on_chord_capture(false);
     if (callbacks_.on_hotkeys_changed) {
         callbacks_.on_hotkeys_changed(next);
     } else {
@@ -1915,6 +2006,11 @@ void ControlWindow::retranslate() {
     set_text(s.quit, tr(Str::Quit));
     set_text(s.restore, tr(Str::RestoreDefaults));
     set_text(s.save_selection, tr(Str::SaveSelection));
+    // The start/stop button carries the state as well as the language, and sync()
+    // only rewrites it when the state changes -- so a switch of language left it
+    // in the one it was labelled in.
+    set_text(s.startstop, tr(s.last_state == InteractionState::Off ? Str::StartMagnifier
+                                                                   : Str::StopMagnifier));
 
     for (int i = 0; i < 4; ++i) set_text(s.shape[i], tr(shape_label(kShapeOrder[i])));
     for (std::size_t i = 0; i < kHotkeyCount; ++i) {

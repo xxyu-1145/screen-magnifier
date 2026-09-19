@@ -25,6 +25,7 @@ constexpr UINT kEdgePollMs = 50;  // requirement 7 measures dwell in 500 ms step
 // to it with PostThreadMessage.
 constexpr UINT kMsgReRegister = WM_APP + 0x101;
 constexpr UINT kMsgSetLowLevel = WM_APP + 0x102;
+constexpr UINT kMsgSuspend = WM_APP + 0x103;
 
 // How long the owner thread waits for the input thread before giving up. Both
 // operations are a handful of microsecond-scale Win32 calls, so a timeout only
@@ -44,6 +45,8 @@ bool g_reregister_request = false;
 bool g_ll_request = false;
 bool g_ll_want = false;
 bool g_ll_result = false;
+bool g_suspend_request = false;
+bool g_suspend_want = false;
 bool g_strict_compat = false;
 std::optional<RectPx> g_requested_zone;
 Px g_requested_band = 0;
@@ -216,6 +219,23 @@ void InputThread::set_strict_compat(bool strict) {
     if (strict) set_low_level_fallback(false);
 }
 
+void InputThread::set_registration_suspended(bool suspended) {
+    if (!running_.load() || thread_id_ == 0) return;
+
+    {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_suspend_want = suspended;
+        g_suspend_request = true;
+    }
+    if (PostThreadMessageW(thread_id_, kMsgSuspend, 0, 0) == FALSE) {
+        std::lock_guard<std::mutex> lock(g_channel_mutex);
+        g_suspend_request = false;
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_channel_mutex);
+    g_channel_cv.wait_for(lock, kHandshakeTimeout, [] { return !g_suspend_request; });
+}
+
 void InputThread::set_edge_zone(std::optional<RectPx> zone_px, Px band_px, bool enabled) {
     std::lock_guard<std::mutex> lock(g_channel_mutex);
     // Applied by poll_cursor on the next tick; the owner thread must not touch
@@ -294,6 +314,25 @@ void InputThread::unregister_all() {
     registered_.clear();
 }
 
+bool InputThread::apply_low_level(bool enabled) {
+    if (enabled) {
+        if (ll_hook_ == nullptr) {
+            // A low-level hook must be installed by the thread that pumps
+            // messages, which is this one.
+            ll_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, &InputThread::ll_keyboard_proc,
+                                         GetModuleHandleW(nullptr), 0);
+        }
+        ll_enabled_.store(ll_hook_ != nullptr);
+        return ll_hook_ != nullptr;
+    }
+    ll_enabled_.store(false);
+    if (ll_hook_ != nullptr) {
+        UnhookWindowsHookEx(ll_hook_);
+        ll_hook_ = nullptr;
+    }
+    return true;
+}
+
 void InputThread::thread_main() {
     thread_id_ = GetCurrentThreadId();
     ll_owner_ = this;
@@ -340,7 +379,11 @@ void InputThread::thread_main() {
                     next = g_requested_chords;
                 }
                 std::vector<HotkeyAction> conflicts;
-                register_all(next, conflicts);
+                // While the chords are released for a rebind, a re-register
+                // would put them straight back and swallow the keystroke the
+                // user is in the middle of typing. The table is already stored;
+                // resuming registers it.
+                if (!suspended_) register_all(next, conflicts);
                 {
                     std::lock_guard<std::mutex> lock(g_channel_mutex);
                     g_requested_conflicts = std::move(conflicts);
@@ -355,28 +398,44 @@ void InputThread::thread_main() {
                     std::lock_guard<std::mutex> lock(g_channel_mutex);
                     want = g_ll_want;
                 }
-                bool result = false;
-                if (want && !g_strict_compat) {
-                    if (ll_hook_ == nullptr) {
-                        // A low-level hook must be installed by the thread that
-                        // pumps messages, which is this one.
-                        ll_hook_ = SetWindowsHookExW(WH_KEYBOARD_LL, &InputThread::ll_keyboard_proc,
-                                                     GetModuleHandleW(nullptr), 0);
-                    }
-                    result = ll_hook_ != nullptr;
-                    ll_enabled_.store(result);
-                } else {
-                    ll_enabled_.store(false);
-                    if (ll_hook_ != nullptr) {
-                        UnhookWindowsHookEx(ll_hook_);
-                        ll_hook_ = nullptr;
-                    }
-                    result = true;
-                }
+                const bool result = apply_low_level(want && !g_strict_compat);
                 {
                     std::lock_guard<std::mutex> lock(g_channel_mutex);
                     g_ll_result = result;
                     g_ll_request = false;
+                }
+                g_channel_cv.notify_all();
+                break;
+            }
+            case kMsgSuspend: {
+                bool want = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    want = g_suspend_want;
+                }
+                if (want) {
+                    // The hook goes first: a chord it owns is swallowed by
+                    // returning 1 from the callback, which is precisely what
+                    // must not happen while the user is trying to type it.
+                    ll_resume_ = ll_enabled_.load();
+                    apply_low_level(false);
+                    unregister_all();
+                    g_ll_chord_count = 0;
+                } else {
+                    std::array<HotkeyChord, kHotkeyCount> chords{};
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        chords = chords_;
+                    }
+                    std::vector<HotkeyAction> ignored_conflicts;
+                    register_all(chords, ignored_conflicts);
+                    if (ll_resume_ && !g_strict_compat) apply_low_level(true);
+                    ll_resume_ = false;
+                }
+                suspended_ = want;
+                {
+                    std::lock_guard<std::mutex> lock(g_channel_mutex);
+                    g_suspend_request = false;
                 }
                 g_channel_cv.notify_all();
                 break;

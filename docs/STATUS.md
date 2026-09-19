@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-19, after the hotkey-fallback revision._
+_Last updated: 2026-09-19, after the viewport-and-rebind revision._
 
 ## Where the project stands
 
@@ -27,15 +27,125 @@ tests:      ./build.sh test
 
 | Suite | Result |
 |---|---|
-| `build.sh test` | **2809 / 2809** core checks pass |
-| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, **editable presets**, **kept regions recalled intact**, clean exit |
+| `build.sh test` | **3054 / 3054** core checks pass (245 of them new: the viewport) |
+| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, editable presets, kept regions recalled intact, **the language switch leaves nothing of the old one behind**, clean exit |
 | `verify_picker.py` | move-by-drag, on-screen confirm button, double-click confirm, Enter confirm |
-| `verify_runtime.py` | **18 / 18** acceptance checks pass, including a chord another application owns |
-| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**) |
-| `measure_perf.py` | idle 37.6 MB / 0.00 % CPU; running **2.19 %** CPU; released to 11.4 MB when switched off |
+| `verify_runtime.py` | **20 / 20** acceptance checks pass, including a chord another application owns, **a chord the program itself owns being reassigned**, and **a bare key being refused with a word rather than in silence** |
+| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); **resizing the window keeps the configured factor** (4.24 vs 48.57 for what a fit scale would draw) |
+| `measure_perf.py` | idle 37.7 MB / 0.00 % CPU; running **0.94 %** CPU; released to 3.1 MB when switched off |
 | `verify_stress.py` | 15 show/hide cycles, frames climbing at 56 fps; `WM_DISPLAYCHANGE` acknowledged |
 | `verify_package.py` | the shipped **.zip** unpacked into a folder named with Chinese characters and a space: starts, magnifies, quits 0, and every DLL it imports ships with Windows |
 | `tools/check_resources.py` | 7 icons, group icon 1, manifest 1; the shell reports the icon |
+
+## The viewport-and-rebind revision (2026-09-19)
+
+Three faults reported from actual use. None of them was visible in the code that looked
+responsible, and one of them was a design decision rather than a slip.
+
+### 1. Resizing the window changed the magnification
+
+The renderer scaled the source to *fit* the window, so the window size and the factor were two ways
+of saying the same thing and the factor box was only ever right when the window happened to be
+exactly `region × factor`. On the shipped defaults — a 320×240 region claiming 4× in a 640×480
+window — the picture was really being drawn at 2× from the first frame, and every drag of an edge
+or of the size slider moved the true scale while the read-out went on showing 4.00×.
+
+`compute_viewport()` now derives the scale from the factor and nothing else, and the window becomes
+what the README had been claiming it was: a viewport. It shows `window ÷ factor` worth of desktop
+centred on the region, so a resize changes how much is in view and never how big it is. The shape
+mask grows with the window to match, which is what lets a rectangle region show the desktop beside
+it; a window *smaller* than the region at that factor crops instead, and because the mask keeps the
+region's own size the circle stays a circle.
+
+Two things fell out of it:
+
+* **The shipped default window is now 1280×960**, which is the shipped region at the shipped
+  factor. A shipped window that shows only part of the shipped region is a worse first run than one
+  that is merely large. An existing config keeps its size, which now means "the viewport is this
+  big" — `适配选区` / *Fit to source* puts it back to the whole region.
+* **`keep_aspect_ratio` no longer selects a fit policy** (contain/cover cannot both exist when the
+  scale is fixed). It still locks the window's proportions while the size slider is dragged, which
+  is what `apply_size_slider()` and the edge-drag path already used it for. The README section that
+  documented contain and cover is gone with it.
+
+**Checked** by a new case in `verify_visual.py`: park a known pattern, drag the size slider, and
+require the window's pixels to still be that pattern at exactly **4×** while the visible source
+grows from 320×240 to 364×273. The same comparison at the scale a *fit* would have produced scores
+48.6 against 4.2, so the check discriminates rather than agreeing with whatever is on screen. The
+245 new core checks cover the viewport directly: the natural size is the region, a bigger window
+shows more desktop centred on it, a smaller one crops it, and the scale is the factor for every
+combination of five factors and five window sizes.
+
+### 2. Switching language drew the new labels on top of the old ones
+
+Look at a screenshot of the English interface before this: the checkboxes read "Exclude from
+capture" *and* `捕获时排除自身`, in the same row, in the same pixels.
+
+Every owner-drawn control composes into a bitmap and blits it whole, and a bitmap that starts
+transparent leaves whatever was underneath it alone. The segmented buttons fill their whole
+rectangle so they were fine; a **checkbox paints only a box and some text**, so the rest of its
+rectangle stayed as it was — and nothing had repainted it, because an owner-drawn button never
+erases its own background. The slider had already been given the fix (`fill the card colour
+first`, with a comment saying why); the buttons had not.
+
+`paint_button()` now fills with the colour of the surface it is actually sitting on, worked out by
+the parent — flat white inside a card or the header, the page's own gradient everywhere else — so
+the anti-aliased edges of a rounded button blend into the right backdrop too.
+
+Two smaller ones in the same family were found while fixing it, both visible in the same
+screenshot: the **start/stop button** never retranslated (it is labelled from the interaction state,
+and `sync()` only rewrites it when the state changes), and the **status line's notices** were stored
+as text captured when the event happened, so a hotkey conflict reported at startup stayed Chinese
+after switching to English. The notice is now a string *id* plus its detail and is composed when the
+line is drawn.
+
+**Checked** by `verify_features.py` **[14]**: click English, then compare the checkbox rows against a
+*fresh paint* of the same controls — relaunch the app, which comes up in the language just chosen —
+and require them to be identical (0.00 per channel, where leftover glyphs are tens of units). A
+screenshot cannot tell "correct" from "correct with leftovers" on its own; a second, independent
+paint can. The same check requires no label to still be Chinese and no control to be pushed out of
+the client area by the re-laid-out window. `screenshot_lang.py`'s tolerance dropped from three
+Chinese labels to one — the `中文` toggle, whose label *is* the language it selects.
+
+### 3. Some keys could not be set, and some did nothing
+
+Two faults, stacked, and the first made the second hard to see.
+
+**Pressing a modifier committed a chord of its own.** The Windows message for Ctrl arrives with Ctrl
+already down, so `handle_chord_key()` — which had no idea that a modifier is not a key — built
+`Ctrl + VK_11` from it and ended the capture there. The letter the user was actually reaching for
+was never seen. Reproduced with a probe: `Ctrl+Alt+J` stored `[2, 17]`, Ctrl and the VK_CONTROL key,
+and the field showed `Ctrl+VK_11`. Modifier keys are now ignored as keys, so the capture waits for
+the key the chord ends on.
+
+**A chord the program already owned could not be typed at all.** `RegisterHotKey` consumes the
+combinations the program holds, so pressing `Ctrl+Alt+M` into a field fired Show/hide and the field
+received nothing — and the chords most likely to be tried while reassigning are the ones already in
+the table. `InputThread::set_registration_suspended()` now releases every chord *and the low-level
+hook* while a field is armed, and puts both back afterwards; the suspend/resume shares the message
+handshake the existing re-register and fallback paths use.
+
+**A refused key now says so.** A bare letter is still refused — binding it would swallow that key in
+every program — but the field used to ignore the press in silence, which is indistinguishable from
+being broken. It now shows `需要配合 Ctrl / Alt / Shift / Win` and stays armed for the next attempt.
+The function keys are still allowed on their own.
+
+**Checked** by two new checks in `verify_runtime.py`. The first types `Ctrl+Alt+M` into the field for
+"Narrower" and requires: the app owns the chord beforehand, does **not** own it while the field is
+armed, stores `[3, 77]` afterwards (Ctrl+Alt+M, not Ctrl+VK_11), holds it again afterwards, and the
+magnifier stayed hidden throughout — the old action must not fire while its chord is being given
+away. The second presses a bare `J` and requires the field's text to change rather than stay silent.
+Both fail on the previous build: the first on `released`, `rebound` and `still_hidden`.
+
+### A harness trap this uncovered
+
+`SetForegroundWindow` from a process that is not itself in the foreground is **refused silently**,
+and attaching thread input only half fixes it. Every injected keystroke then lands in whatever window
+does hold the foreground, which looks exactly like an application that ignores input: an earlier
+version of the probe reported "every second rebind fails" and it was the probe. The checks that type
+now click the window's title bar first — a real click is always granted — and `verify_features.py`'s
+[8] and [12], which used to SKIP with "the settings window would not come to the front" whenever the
+machine was busy, no longer do.
 
 ## The kept-regions revision (2026-09-19)
 
@@ -356,3 +466,11 @@ comparison is what has teeth. `verify_features.py` check [7] does this.
 A fourth: a second instance of the app exits immediately with code 0, so one left running from an
 earlier harness makes the next launch look like it failed to start. Check for a stray `magnifier.exe`
 before trusting a harness failure.
+
+A fifth: `SetForegroundWindow` from a process that is not itself in the foreground is refused, and
+it is refused *silently*. Any keystroke the harness injects afterwards goes to whichever window does
+hold the foreground, so a check that types into a field reports the program ignoring input when the
+program never saw the keys. Click the target window's title bar instead — a real click is always
+granted — and `take_foreground()` in `verify_features.py` / `verify_runtime.py` does that. This one
+cost an afternoon: it produced a convincing "every second rebind is lost" that was entirely the
+probe.
