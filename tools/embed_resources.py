@@ -34,7 +34,7 @@ IMAGE_DIRECTORY_ENTRY_RESOURCE = 2
 
 MANIFEST = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="Magnifier" version="1.0.2.0"
+  <assemblyIdentity type="win32" name="Magnifier" version="1.0.3.0"
                     processorArchitecture="*"/>
   <description>Screen Magnifier</description>
 

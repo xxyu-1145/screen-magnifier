@@ -1,6 +1,6 @@
 """Prove the shipped archive works when someone else unpacks it.
 
-What gets sent is `dist/ScreenMagnifier-1.0.2.zip`, not this repository, so the
+What gets sent is `dist/ScreenMagnifier-1.0.3.zip`, not this repository, so the
 thing that has to be verified is the archive: unpacked somewhere with nothing
 else in it, started from there, and driven far enough to show a magnified
 picture.
@@ -36,10 +36,10 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ARCHIVE = ROOT / "dist" / "ScreenMagnifier-1.0.2.zip"
+ARCHIVE = ROOT / "dist" / "ScreenMagnifier-1.0.3.zip"
 CONFIG_DIR = Path(os.environ.get("APPDATA", "")) / "Magnifier"
 # Where a Chinese recipient is most likely to unpack it.
-UNPACK_AS = "屏幕放大镜 1.0.2"
+UNPACK_AS = "屏幕放大镜 1.0.3"
 
 u = ctypes.WinDLL("user32", use_last_error=True)
 k = ctypes.WinDLL("kernel32")
