@@ -106,6 +106,13 @@ constexpr UINT kMsgSizeMoved = WM_APP + 14;    // wparam = output width in pixel
 constexpr UINT_PTR kFactorCommitTimer = 0x51;
 constexpr UINT kFactorCommitDelayMs = 500;
 
+// Saving a region writes it into whichever numbered button is lit, and that
+// button does not change when the region does -- so saving twice in a row
+// overwrites the same slot and the screen shows nothing whatsoever, which reads
+// as the button being broken. It says so on itself for a moment instead.
+constexpr UINT_PTR kSaveConfirmTimer = 0x52;
+constexpr UINT kSaveConfirmMs = 1400;
+
 constexpr SelectionShape kShapeOrder[4] = {
     SelectionShape::Rectangle, SelectionShape::Circle, SelectionShape::Ellipse,
     SelectionShape::RoundedRectangle};
@@ -1529,6 +1536,11 @@ LRESULT CALLBACK ControlWindow::wnd_proc(HWND hwnd, UINT message, WPARAM wparam,
                 if (s.preset_editing >= 0) commit_preset_edit(s.preset_editing, false);
                 return 0;
             }
+            if (wparam == kSaveConfirmTimer) {
+                KillTimer(hwnd, kSaveConfirmTimer);
+                set_text(s.save_selection, tr(Str::SaveSelection));
+                return 0;
+            }
             break;
 
         case WM_SIZE:
@@ -1762,6 +1774,12 @@ void ControlWindow::on_command(int control_id, int notify_code) {
             return;
         case kIdSaveSelection:
             if (callbacks_.on_save_selection) callbacks_.on_save_selection();
+            // Confirmed on the button itself, not only in the status line: the
+            // write target is the lit number and it does not move when the
+            // region does, so a second save with everything already in place
+            // used to change nothing on screen at all.
+            set_text(s.save_selection, tr(Str::SelectionSavedMark));
+            SetTimer(hwnd_, kSaveConfirmTimer, kSaveConfirmMs, nullptr);
             return;
         case kIdExcludeCapture:
             toggle_check(kIdExcludeCapture, s.exclude, callbacks_.on_exclude_from_capture_changed);

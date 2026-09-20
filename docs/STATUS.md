@@ -109,14 +109,19 @@ Every mechanical path works, and each was checked against the real executable:
   minimum, so nothing is covered or clipped;
 * a real mouse click (not `BM_CLICK`) on the button, which is how a user would press it.
 
-What could still read as "it does nothing" is the gesture itself: **the write target is the lit
+What could still read as "it does nothing" was the gesture itself: **the write target is the lit
 button and it does not move when the region does**, so saving twice in a row overwrites the same slot
-and produces no visible change at all. The status line now says where the save went
-(`已保存到选区 2`), which is the only feedback this gesture has, and both readmes explain that a
-different slot means clicking its number first. If the report meant something else, the remaining
-suspects are a magnifier window covering the settings window (it is topmost, and a click that lands
-on it drags it instead of pressing the button) and a saved region that is no longer on the desktop
-after a display change.
+and produces no visible change at all. Asked directly, the report was "completely no reaction, no
+visible change", with the magnifier off — which is exactly that case, since the only thing a save
+used to change on screen was a light that was already on. The gesture now confirms itself:
+
+* the button says `已保存 ✓` for a second and a half where the click landed, and
+* the status line names the slot it went to (`已保存到选区 2`).
+
+Both readmes explain that a different slot means clicking its number first. If the report meant
+something else, the remaining suspects are a magnifier window covering the settings window (it is
+topmost, and a click that lands on it drags it instead of pressing the button) and a saved region
+that is no longer on the desktop after a display change.
 
 ## The shape-and-mouse revision (2026-09-19)
 

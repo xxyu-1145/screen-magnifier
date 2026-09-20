@@ -49,6 +49,7 @@ enum class Language : std::uint32_t { Chinese = 0, English = 1 };
     X(KeepAspect, "保持比例", "Keep aspect")                                       \
     X(SaveSelection, "保存选区", "Save region")                                    \
     X(SelectionSaved, "已保存到选区 ", "saved to region ")                          \
+    X(SelectionSavedMark, "已保存 ✓", "Saved ✓")                                     \
     /* --- hotkey actions --- */                                                         \
     X(HkToggleMagnifier, "显示 / 隐藏放大镜", "Show / hide")              \
     X(HkTogglePassThrough, "切换鼠标穿透", "Click-through")                       \

@@ -130,10 +130,12 @@ anyone who does not want a keyboard hook in their session.
   route — a typed number, an arrow hotkey, the slider, an edge drag — and the other follows. Turn it
   off to resize the two axes independently.
 * **Keep a region** — the numbered buttons under the shapes hold four regions. The lit button is the
-  one that will be written to, and the status line says which slot each save went to
-  (`已保存到选区 2`). Click one to recall it, adjust the region however you like, then
-  `保存选区` / `Save region` writes the region now in force into the lit button. The first four
-  buttons start out holding the shipped region, so recalling one always goes somewhere.
+  one that will be written to; `保存选区` / *Save region* says `已保存 ✓` on itself and names the slot
+  in the status line (`已保存到选区 2`), because a save into a slot that already holds that region
+  changes nothing else on screen. Click a number to recall it, adjust the region however you like,
+  save into the lit one, and click a *different* number first when you want to keep the next region
+  somewhere else. The first four buttons start out holding the shipped region, so recalling one
+  always goes somewhere.
 * **Change language** — the `中文` / `English` toggle in the settings header switches the whole
   interface and the tray menu immediately, and the choice is saved.
 * **Set the presets** — the fields under the four factor buttons say what each preset is. The

@@ -832,6 +832,17 @@ def main() -> int:
             kept = stored_slots()[0]["bounds_px"] if stored_slots() else None
             print(f"    region was {original}, reset to {moved}, saved slot 1 as {kept}")
 
+            # The gesture has to say something: the write target is the lit
+            # button and it does not move when the region does, so a save with
+            # everything already in place changes nothing on screen and reads as
+            # the button being broken.
+            line = status_line(p.pid)
+            said = ("已保存到选区" in line) or ("saved to region" in line)
+            print(f"    the status line names the slot it went to: {said}")
+            if not said:
+                print("    FAIL: saving gave no feedback about where the region went")
+                failures += 1
+
             # Slot 2 still holds the shipped region, so recalling it has to put
             # the original back; slot 1 has to bring the saved one back.
             u.SendMessageW(slot2, 0x00F5, 0, 0)
