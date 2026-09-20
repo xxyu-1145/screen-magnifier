@@ -616,8 +616,12 @@ void test_magnification_controller() {
     m.set_factor(mag::kQ16One * 2);
     CHECK(m.current().factor_q16 == mag::kQ16One * 2);
 
+    // An axis the caller moves out of range is refused. The ratio lock derives
+    // the *other* axis -- which is then legal by construction -- so a pair that
+    // moves both is judged on the width, the one the rule treats as
+    // authoritative; the height-only case below is judged on the height.
     CHECK_THROWS(m.resize_output(mag::SizePx{119, 500}), std::out_of_range);
-    CHECK_THROWS(m.resize_output(mag::SizePx{500, mag::kMinOutputEdgePx - 1}), std::out_of_range);
+    CHECK_THROWS(m.resize_output(mag::SizePx{320, mag::kMinOutputEdgePx - 1}), std::out_of_range);
     CHECK_THROWS(m.resize_output(mag::SizePx{2000, 500}), std::out_of_range);
     m.resize_output(mag::SizePx{640, 480});
     CHECK(m.current().output_size_px == (mag::SizePx{640, 480}));
@@ -938,6 +942,86 @@ void test_hotkey_text() {
     CHECK(mag::to_json(cfg).find("Mouse4") == std::string::npos);  // numbers, not names
 }
 
+// ---------------------------------------------------------------------------
+// §5.4 the ratio lock on every resize path
+// ---------------------------------------------------------------------------
+
+void test_ratio_lock() {
+    RecordingBus bus;
+    mag::MagnificationController m(bus, mk(0, 0, 1920, 1440));
+
+    // Start from a 4:3 window with the lock on (the shipped default).
+    m.resize_output(mag::SizePx{1280, 960});
+    CHECK(m.current().keep_aspect_ratio);
+    CHECK(m.current().output_size_px == (mag::SizePx{1280, 960}));
+
+    // Changing one axis moves the other: that is what "keep the ratio" means,
+    // and it has to hold however the resize arrived -- a typed width, a stepped
+    // hotkey, a dragged slider or an edge drag all come through here.
+    m.resize_output(mag::SizePx{800, 960});
+    CHECK(m.current().output_size_px == (mag::SizePx{800, 600}));
+    m.resize_output(mag::SizePx{800, 1200});
+    CHECK(m.current().output_size_px == (mag::SizePx{1600, 1200}));
+
+    // A size that moved both axes keeps the width and derives the height.
+    m.resize_output(mag::SizePx{1000, 1000});
+    CHECK(m.current().output_size_px == (mag::SizePx{1000, 750}));
+
+    // The arrow hotkeys step one axis and the other follows.
+    m.resize_output(mag::SizePx{1000, 750});
+    m.step_output_size(64, 0);
+    CHECK(m.current().output_size_px == (mag::SizePx{1064, 798}));
+    m.step_output_size(0, 40);
+    CHECK(m.current().output_size_px == (mag::SizePx{1117, 838}));   // 798 + 40, width derived
+
+    // Undoing a step lands back where it started: the derivation rounds rather
+    // than truncating, so a round trip cannot drift a pixel at a time.
+    const mag::SizePx before = m.current().output_size_px;
+    m.step_output_size(64, 0);
+    m.step_output_size(-64, 0);
+    CHECK(m.current().output_size_px == before);
+
+    // At the desktop ceiling the derived side clamps and the moved side comes
+    // back with it, so the window stops growing instead of going lopsided. A
+    // square window asked to be 1920 wide wants to be 1920 tall, and the
+    // desktop is 1440: both come back as 1440.
+    m.set_keep_aspect_ratio(false);
+    m.resize_output(mag::SizePx{1000, 1000});
+    m.set_keep_aspect_ratio(true);
+    m.resize_output(mag::SizePx{1920, 1000});
+    CHECK(m.current().output_size_px == (mag::SizePx{1440, 1440}));
+
+    // With the lock off, one axis moves alone. That is the whole difference
+    // between the two settings.
+    m.set_keep_aspect_ratio(false);
+    m.resize_output(mag::SizePx{1280, 960});
+    m.resize_output(mag::SizePx{800, 960});
+    CHECK(m.current().output_size_px == (mag::SizePx{800, 960}));
+    m.resize_output(mag::SizePx{800, 1200});
+    CHECK(m.current().output_size_px == (mag::SizePx{800, 1200}));
+
+    // A resize that asks for nothing keeps the shape it has, and an
+    // out-of-range primary axis is still refused rather than clamped into
+    // something else: that is the documented contract of resize_output().
+    m.set_keep_aspect_ratio(false);
+    m.resize_output(mag::SizePx{1024, 768});
+    m.set_keep_aspect_ratio(true);
+    m.resize_output(mag::SizePx{1024, 768});
+    CHECK(m.current().output_size_px == (mag::SizePx{1024, 768}));
+    CHECK_THROWS(m.resize_output(mag::SizePx{19, 768}), std::out_of_range);
+    CHECK_THROWS(m.resize_output(mag::SizePx{1024, 19}), std::out_of_range);
+    CHECK(m.current().output_size_px == (mag::SizePx{1024, 768}));
+
+    // The ratio is the *window's*, not the selection's: fitting the window to
+    // the region at a factor sets an exact size and is deliberately not locked,
+    // or a region whose proportions differ from the window's could never be
+    // shown whole.
+    const mag::SelectionConfig sel{mk(0, 0, 320, 180), mag::SelectionShape::Rectangle, 0};
+    m.set_factor(mag::kQ16One * 4);
+    m.fit_output_to_selection(sel);
+    CHECK(m.current().output_size_px == (mag::SizePx{1280, 720}));
+}
+
 }  // namespace
 
 int main() {
@@ -952,6 +1036,7 @@ int main() {
     test_random_round_trips();
     test_magnification_controller();
     test_viewport();
+    test_ratio_lock();
     test_hotkey_text();
     test_selection_slots();
     test_interaction_state_machine();

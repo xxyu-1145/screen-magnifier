@@ -74,6 +74,14 @@ public:
 private:
     void publish_current();
     void clamp_position();
+    // Fits a proposed window size to the proportions the window has now, when
+    // the ratio is being kept. Every resize path goes through this -- the typed
+    // size and the Apply button, the arrow hotkeys, the size slider and an edge
+    // drag on the window itself -- so "keep the ratio" means the same thing
+    // wherever the resize came from. The axis the caller moved decides which one
+    // is authoritative; when both moved (a corner drag, or two numbers typed
+    // into the boxes) the width wins, being the axis people read first.
+    SizePx with_ratio_lock(SizePx size_px) const noexcept;
 
     IEventBus& bus_;
     RectPx virtual_bounds_px_;

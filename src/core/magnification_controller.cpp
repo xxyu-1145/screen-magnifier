@@ -220,6 +220,7 @@ void MagnificationController::step_factor(int steps) {
 }
 
 void MagnificationController::resize_output(SizePx size_px) {
+    size_px = with_ratio_lock(size_px);
     const Px max_w = width_of(virtual_bounds_px_);
     const Px max_h = height_of(virtual_bounds_px_);
     if (size_px.width < kMinOutputEdgePx || size_px.height < kMinOutputEdgePx ||
@@ -233,13 +234,69 @@ void MagnificationController::resize_output(SizePx size_px) {
     publish_current();
 }
 
+// The proportion the window has now, applied to whichever axis the caller did
+// not move. The derived side is clamped into the legal range rather than
+// throwing: a drag that reaches the edge of the desktop should stop growing, not
+// make the whole resize silently do nothing.
+SizePx MagnificationController::with_ratio_lock(SizePx size_px) const noexcept {
+    if (!config_.keep_aspect_ratio) return size_px;
+    const SizePx cur = config_.output_size_px;
+    if (cur.width <= 0 || cur.height <= 0) return size_px;
+    if (size_px.width <= 0 || size_px.height <= 0) return size_px;
+
+    const bool width_moved = size_px.width != cur.width;
+    const bool height_moved = size_px.height != cur.height;
+    if (!width_moved && !height_moved) return size_px;
+
+    const Px max_w = largest(kMinOutputEdgePx, width_of(virtual_bounds_px_));
+    const Px max_h = largest(kMinOutputEdgePx, height_of(virtual_bounds_px_));
+    // Rounded rather than truncated, so a width and the height derived from it
+    // come back to the size they started as when the caller undoes the change.
+    const auto derived = [](Px known, Px known_ref, Px other_ref) -> Px {
+        const std::int64_t v =
+            (static_cast<std::int64_t>(known) * other_ref + known_ref / 2) / known_ref;
+        return static_cast<Px>(v < 1 ? 1 : v);
+    };
+
+    if (width_moved) {
+        const Px wanted = derived(size_px.width, cur.width, cur.height);
+        const Px height = clamp_px(wanted, kMinOutputEdgePx, max_h);
+        if (height != wanted) {
+            // The derived side hit the desktop, so the moved side comes back
+            // with it -- but only while it is a legal size itself. A width that
+            // is out of range has to reach resize_output()'s range check
+            // unchanged, so that it is still refused rather than quietly turned
+            // into something else.
+            size_px.height = height;
+            if (size_px.width >= kMinOutputEdgePx && size_px.width <= max_w) {
+                size_px.width = derived(height, cur.height, cur.width);
+            }
+            return size_px;
+        }
+        size_px.height = height;
+        return size_px;
+    }
+
+    const Px wanted = derived(size_px.height, cur.height, cur.width);
+    const Px width = clamp_px(wanted, kMinOutputEdgePx, max_w);
+    if (width != wanted) {
+        size_px.width = width;
+        if (size_px.height >= kMinOutputEdgePx && size_px.height <= max_h) {
+            size_px.height = derived(width, cur.width, cur.height);
+        }
+        return size_px;
+    }
+    size_px.width = width;
+    return size_px;
+}
+
 void MagnificationController::step_output_size(Px dx, Px dy) {
     const Px max_w = largest(kMinOutputEdgePx, width_of(virtual_bounds_px_));
     const Px max_h = largest(kMinOutputEdgePx, height_of(virtual_bounds_px_));
     const Px w = clamp_px(add_sat(config_.output_size_px.width, dx), kMinOutputEdgePx, max_w);
     const Px h = clamp_px(add_sat(config_.output_size_px.height, dy), kMinOutputEdgePx, max_h);
     if (w == config_.output_size_px.width && h == config_.output_size_px.height) return;
-    const SizePx size{w, h};
+    const SizePx size = with_ratio_lock(SizePx{w, h});
     const PointPx top_left = centred_top_left(output_rect(), size);
     config_.output_size_px = size;
     output_position_px_ = top_left;

@@ -93,6 +93,10 @@ public:
     // would make the arming gesture start the capture instead of ending it.
     void handle_chord_mouse_button(UINT message, WPARAM wparam);
     bool capturing_chord() const noexcept { return chord_capture_index_ >= 0; }
+    // True when `edit` is the field a capture is currently armed on. Used by the
+    // field's own subclass so losing focus to a *different* field cannot disarm
+    // the one being entered.
+    bool is_armed_field(HWND edit) const noexcept;
 
     // Reads the factor box, clamps it into the legal range and applies it.
     // `rewrite` puts the canonical text back; it is left alone while the user is

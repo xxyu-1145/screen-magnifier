@@ -565,6 +565,35 @@ def main() -> int:
                 f"foreground={foreground} owned={owned_before} field={clicked} "
                 f"released while armed={released} rebound={stored} "
                 f"re-registered={owns_after}, the old action stayed put={still_hidden}")
+
+        # --- and the next field, clicked straight after this one -------------
+        #
+        # SetFocus() delivers WM_KILLFOCUS synchronously to the field being left,
+        # and its handler cancels the capture -- so arming the new field before
+        # the focus move left it showing "press a key" with nothing armed, and
+        # every key after that was ignored. Changing one hotkey and then clicking
+        # the next one made the second field dead, which reads as the program
+        # refusing the key rather than as the click not taking.
+        field_a = find_child(p3.pid, 1100 + ACTION["GrowHeight"])
+        field_b = find_child(p3.pid, 1100 + ACTION["GrowWidth"])
+        chained = False
+        if field_a is not None and field_b is not None:
+            click_control(field_a)
+            time.sleep(0.5)
+            click_control(field_b)          # no click on the window in between
+            time.sleep(0.5)
+            tap(0xA2)                       # LCtrl
+            tap(0xA4)                       # LAlt
+            tap(0x4E)                       # 'N'
+            tap(0x4E, up=True)
+            tap(0xA4, up=True)
+            tap(0xA2, up=True)
+            time.sleep(1.8)
+            chained = saved("hotkeys", {}).get("GrowWidth") == [MOD_CONTROL | MOD_ALT, 0x4E]
+        rep.add("a second chord field works when it is clicked straight after another",
+                chained,
+                f"GrowWidth = {saved('hotkeys', {}).get('GrowWidth')} "
+                f"(Ctrl+Alt+N is [{MOD_CONTROL | MOD_ALT}, {0x4E}])")
         rep.add("a key that needs a modifier is refused, and says so",
                 hinted, f"the field went from {armed_text!r} to a refusal notice")
 

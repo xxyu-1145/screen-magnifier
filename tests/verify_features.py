@@ -686,6 +686,70 @@ def main() -> int:
                     print("    FAIL: fit to source did not restore the full region")
                     failures += 1
 
+            # --- keep the ratio: one axis moves, the other follows ----------
+            #
+            # 保持比例 is a lock on the window's shape, so it has to hold for
+            # every way the size can change -- a typed number and Apply, an
+            # arrow hotkey, the slider, or an edge drag. Typing into one box
+            # used to resize by exactly what was typed and leave the other axis
+            # alone, which is what "the ratio is locked" is supposed to prevent.
+            keep_box = find_child(p.pid, 1034)
+            width_box = find_child(p.pid, 1030)
+            height_box = find_child(p.pid, 1031)
+            apply_button = find_child(p.pid, 1032)
+            if None in (keep_box, width_box, height_box, apply_button):
+                print("    FAIL: the ratio lock or the size fields were not found")
+                failures += 1
+            else:
+                def click(hwnd):
+                    u.SendMessageW(hwnd, 0x0201, 0x0001, 0)
+                    u.SendMessageW(hwnd, 0x0202, 0, 0)
+
+                u.SendMessageW(apply_button, 0x00F5, 0, 0)   # start from the fitted size
+                time.sleep(1.2)
+                before = window_rect()
+                start = (before[2] - before[0], before[3] - before[1])
+
+                take_foreground(win(p.pid))
+                click(width_box)
+                u.SendMessageW(width_box, 0x00B1, 0, -1)    # EM_SETSEL: all
+                for vk in (0x38, 0x30, 0x30):               # "800"
+                    tap(vk)
+                time.sleep(0.4)
+                click(apply_button)
+                time.sleep(1.6)
+                after = window_rect()
+                got = (after[2] - after[0], after[3] - after[1])
+                # The height the lock asks for, from the size it started at.
+                ratio = start[1] / start[0] if start[0] else 0
+                wanted = (800, int(round(800 * ratio)))
+                print(f"    {start[0]}x{start[1]} -> typed 800 in 宽 -> {got} "
+                      f"(x {ratio:.3f} is {wanted})")
+
+                unlocked_ok = True
+                # And with the lock off, the same edit moves only that axis --
+                # otherwise "keep aspect" would be a label that does nothing.
+                click(keep_box)
+                time.sleep(0.5)
+                click(width_box)
+                u.SendMessageW(width_box, 0x00B1, 0, -1)
+                for vk in (0x39, 0x30, 0x30):               # "900"
+                    tap(vk)
+                time.sleep(0.4)
+                click(apply_button)
+                time.sleep(1.6)
+                free = window_rect()
+                free_size = (free[2] - free[0], free[3] - free[1])
+                unlocked_ok = free_size == (900, got[1])
+                click(keep_box)                              # back on, as shipped
+                time.sleep(0.5)
+
+                if got == wanted and unlocked_ok:
+                    print("    PASS: the ratio is kept on one axis, and only when it is on")
+                else:
+                    print("    FAIL: the ratio lock did not do what it says")
+                    failures += 1
+
         # --- 12. the preset factors can be typed ---------------------------
         #
         # The button jumps to the preset; the field under it says what the

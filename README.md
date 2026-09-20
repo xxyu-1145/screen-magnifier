@@ -73,6 +73,11 @@ what starts the capture. Two things are worth knowing:
 * The hook is installed **only while a mouse-button binding exists**. It costs every mouse event in
   the session a trip to the program's input thread, so it is not worth having for someone who
   binds keyboard chords alone.
+* One way to *record* a chord does not work, and it is the system's doing rather than the field's:
+  pressing `Win` opens the Start menu and takes the focus, so the capture ends before the rest of
+  the chord arrives. `Ctrl`/`Alt`/`Shift` chords can all be recorded; a `Win` chord cannot. Every
+  other key a window can receive works, and a chord can be given any of the four modifiers by hand
+  in `config.json` if one is really wanted.
 
 | Chord | Action |
 |---|---|
@@ -121,13 +126,16 @@ anyone who does not want a keyboard hook in their session.
   middle if it has wandered. The minimum is 120×120 and the maximum is the current desktop.
   Resizing changes how much of the screen the window shows, never the magnification — for a bigger
   or smaller picture, use the factor.
+* **Keep the ratio** — `保持比例` / *Keep aspect* locks the window's shape: change one axis by any
+  route — a typed number, an arrow hotkey, the slider, an edge drag — and the other follows. Turn it
+  off to resize the two axes independently.
+* **Keep a region** — the numbered buttons under the shapes hold four regions. The lit button is the
+  one that will be written to, and the status line says which slot each save went to
+  (`已保存到选区 2`). Click one to recall it, adjust the region however you like, then
+  `保存选区` / `Save region` writes the region now in force into the lit button. The first four
+  buttons start out holding the shipped region, so recalling one always goes somewhere.
 * **Change language** — the `中文` / `English` toggle in the settings header switches the whole
   interface and the tray menu immediately, and the choice is saved.
-* **Keep a region** — the numbered buttons under the shapes hold four regions. Click one to
-  recall it, adjust the region however you like, then `保存选区` / `Save region` writes the region
-  now in force into whichever button is lit. The lit button is the one that will be written to,
-  and it is remembered across restarts; the first four buttons start out holding the shipped
-  region, so recalling one always goes somewhere.
 * **Set the presets** — the fields under the four factor buttons say what each preset is. The
   button jumps there, the chord `Ctrl+Alt+1..4` jumps there, and either can be changed by typing
   the number in the field. Anything from 1× to 10× is accepted, and a value out of range lands
@@ -288,10 +296,10 @@ Setting `MAG_DIAG=1` appends the internal frame counters to the status line.
 ## Testing
 
 ```bash
-bash build.sh test              # 3460 assertions over the pure domain
+bash build.sh test              # 3476 assertions over the pure domain
 python tests/verify_features.py # the shipped defaults: language, centring, 10x cap, the slider, reset
 python tests/verify_picker.py   # the region picker: move, confirm button, double click, Enter
-python tests/verify_runtime.py  # 21 black-box acceptance checks against the real executable
+python tests/verify_runtime.py  # 22 black-box acceptance checks against the real executable
 python tests/verify_visual.py   # proves the magnification is pixel-exact, in all four shapes
 python tests/measure_perf.py    # the resource budgets, measured rather than assumed
 python tests/verify_stress.py   # repeated show/hide cycles and a display-configuration change

@@ -606,7 +606,10 @@ LRESULT CALLBACK chord_edit_subclass(HWND hwnd, UINT message, WPARAM wparam, LPA
         case WM_SYSCHAR:
             return 0;
         case WM_KILLFOCUS:
-            self->cancel_chord_capture();
+            // Only the field that is actually armed may end the capture: focus
+            // often moves *to* another chord field, and cancelling on behalf of
+            // the one being left behind would disarm the one being entered.
+            if (self->is_armed_field(hwnd)) self->cancel_chord_capture();
             break;
         default:
             break;
@@ -1801,14 +1804,28 @@ void ControlWindow::begin_chord_capture(HWND edit) {
         }
     }
     if (index < 0) return;
-    chord_capture_index_ = index;
+
+    // The focus move comes first, and the arming after it. SetFocus() delivers
+    // WM_KILLFOCUS *synchronously* to whatever had the keyboard -- and if that
+    // was another chord field, its handler cancels the capture, which resets
+    // chord_capture_index_ to -1. Arming before the move therefore left the new
+    // field showing "press a key" while nothing was armed at all, so every key
+    // after it was ignored: changing one hotkey and then clicking the next
+    // field made the second one dead.
     SetFocus(edit);
+    chord_capture_index_ = index;
     SetWindowTextW(edit, tr(Str::PressAKey));
     // Every chord the program owns has to stop being registered while the user
     // is typing one: RegisterHotKey consumes its own chords, so pressing the one
     // that is already taken -- which is exactly what someone reassigning a
     // hotkey does -- fired the action and the field never saw the key at all.
     if (callbacks_.on_chord_capture) callbacks_.on_chord_capture(true);
+}
+
+bool ControlWindow::is_armed_field(HWND edit) const noexcept {
+    if (chord_capture_index_ < 0) return false;
+    const auto& s = *impl_;
+    return s.hk_edit[static_cast<std::size_t>(chord_capture_index_)] == edit;
 }
 
 void ControlWindow::cancel_chord_capture() {

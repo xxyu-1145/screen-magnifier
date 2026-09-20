@@ -485,7 +485,12 @@ void InputThread::thread_main() {
                     // The hook goes first: a chord it owns is swallowed by
                     // returning 1 from the callback, which is precisely what
                     // must not happen while the user is trying to type it.
-                    ll_resume_ = ll_enabled_.load();
+                    //
+                    // Re-suspending while already suspended must not overwrite
+                    // what to restore: the state it was in is only knowable on
+                    // the way *into* the first suspend, and the hook would be
+                    // lost for good if the second run recorded "it was off".
+                    if (!suspended_) ll_resume_ = ll_enabled_.load();
                     apply_low_level(false);
                     unregister_all();
                     g_ll_chord_count = 0;

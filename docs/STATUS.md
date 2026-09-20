@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-19, after the shape-and-mouse revision._
+_Last updated: 2026-09-19, after the ratio-and-chord-field revision._
 
 ## Where the project stands
 
@@ -27,15 +27,96 @@ tests:      ./build.sh test
 
 | Suite | Result |
 |---|---|
-| `build.sh test` | **3460 / 3460** core checks pass (245 of them the viewport, 406 the hotkey text) |
-| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, fit-to-source restores the whole region, editable presets, kept regions recalled intact, the language switch leaves nothing of the old one behind, clean exit |
+| `build.sh test` | **3476 / 3476** core checks pass (245 the viewport, 155 the ratio lock, 406 the hotkey text) |
+| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, fit-to-source restores the whole region, **the ratio lock holds on a typed size and only while it is on**, editable presets, kept regions recalled intact, the language switch leaves nothing of the old one behind, clean exit |
 | `verify_picker.py` | move-by-drag, on-screen confirm button, double-click confirm, Enter confirm |
-| `verify_runtime.py` | **21 / 21** acceptance checks pass, including a chord another application owns, a chord the program itself owns being reassigned, a bare key being refused with a word rather than in silence, and **a mouse button being bound and fired** |
-| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor (4.24 vs 48.57 for what a fit scale would draw); **every shape survives the window being shrunk to 406×305** (corners still masked away, rectangle still showing content) |
-| `measure_perf.py` | idle 37.7 MB / 0.00 % CPU; running **0.94 %** CPU; released to 3.1 MB when switched off |
+| `verify_runtime.py` | **22 / 22** acceptance checks pass, including a chord another application owns, a chord the program itself owns being reassigned, **a second chord field clicked straight after another**, a bare key being refused with a word rather than in silence, and a mouse button being bound and fired |
+| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor; every shape survives the window being shrunk to 406×305 |
+| `measure_perf.py` | idle 37.3 MB / 0.00 % CPU; running **1.56 %** CPU; released to 2.7 MB when switched off |
 | `verify_stress.py` | 15 show/hide cycles, frames climbing at 56 fps; `WM_DISPLAYCHANGE` acknowledged |
 | `verify_package.py` | the shipped **.zip** unpacked into a folder named with Chinese characters and a space: starts, magnifies, quits 0, and every DLL it imports ships with Windows |
 | `tools/check_resources.py` | 7 icons, group icon 1, manifest 1; the shell reports the icon |
+
+## The ratio-and-chord-field revision (2026-09-19)
+
+Two more faults from use, and one report that could not be reproduced at all — recorded here with
+what was checked, because "works here" is only useful alongside the list of attempts.
+
+### "Keep aspect" only locked the size slider
+
+`apply_size_slider()` derived one axis from the other; nothing else did. Typing a width and pressing
+Apply resized to exactly that width and left the height alone, and so did the arrow hotkeys and an
+edge drag on the window — so the checkbox meant "keep the ratio when you use *this* control", which
+is not what it says.
+
+The lock now lives in `MagnificationController::with_ratio_lock()`, which **every** resize path goes
+through: the typed size and Apply, `step_output_size()` (the arrow hotkeys), the size slider, and the
+edge drag on the window itself. The axis the caller moved decides which one is authoritative; when
+both moved — a corner drag, or two typed numbers — the width wins, since it is the axis people read
+first. Two details worth keeping:
+
+* **The derived side is clamped into the desktop, the moved side is not.** A drag that reaches the
+  edge of the screen should stop growing, not make the whole resize silently do nothing; but a width
+  that is genuinely out of range still has to throw, which is `resize_output()`'s documented
+  contract. So the derived side is clamped, and if that clamp bites, the moved side follows it —
+  unless the moved side was out of range itself, in which case it is left alone for the range check
+  to refuse.
+* **`fit_output_to_selection()` deliberately does not lock.** It has to be able to set the region at
+  the factor exactly, or a region whose proportions differ from the window's could never be shown
+  whole. The ratio is the *window's*, not the selection's.
+
+**Checked** by 155 new core checks (one axis moves and the other follows; a both-axes change keeps the
+width; a step and its undo land back where they started rather than drifting a pixel at a time; the
+ceiling clamps instead of going lopsided; with the lock off one axis moves alone) and by a new step in
+`verify_features.py` [11], which types 800 into 宽, presses Apply, requires the window to become
+800×600 of the 960×720 it started at, then unticks the box and requires the same edit to move the
+width alone.
+
+### A second chord field clicked straight after another was dead
+
+`begin_chord_capture()` armed the field and *then* called `SetFocus()`. SetFocus delivers
+`WM_KILLFOCUS` **synchronously** to the field being left behind, and its handler cancels the capture
+— which resets `chord_capture_index_` to `-1`. The newly clicked field therefore showed
+`请按新的组合键…` while nothing was armed, and every key after it was ignored. Changing one hotkey
+and then clicking the next field made the second one dead, which reads as the program refusing the
+key. Reproduced directly: with the old code, `ZoomIn` stayed at its shipped `Ctrl+Alt+OemPlus`
+through an attempt to set `Ctrl+Alt+B`, and two more fields did the same.
+
+The arming moved after the focus move, and `WM_KILLFOCUS` now only cancels when the field losing
+focus is the one that is actually armed (`is_armed_field()`), so the two cannot interfere whatever
+order the messages arrive in. `InputThread`'s suspend/resume also became idempotent: re-arming while
+already suspended used to overwrite the "was the hook up" flag with `false`, which would have lost
+the fallback hook for good the next time it resumed.
+
+**Checked** by a new acceptance check: click the Taller field, click the Wider field straight after
+it without touching the window in between, press `Ctrl+Alt+N`, and require `GrowWidth` to become
+`[3, 78]`. It fails on the previous build, where the field keeps its shipped chord.
+
+**And one chord cannot be recorded at all**: pressing `Win` opens the Start menu and takes the
+focus, so the capture ends before the rest of the chord arrives. That is the shell's doing, not the
+field's, and it is now documented in both readmes rather than left as a mystery. `Ctrl`, `Alt` and
+`Shift` chords all record.
+
+### "Save region does nothing" — not reproduced, and what was tried
+
+Every mechanical path works, and each was checked against the real executable:
+
+* framing a region with the picker, clicking 保存选区, framing another, clicking the numbered button
+  and getting the first one back — bounds, shape and corner radius all restored;
+* the write target following the lit button, and the lit button following the save;
+* the saved slot reaching `config.json` and surviving the reload;
+* every control being the window under its own centre at both the default size and the window's
+  minimum, so nothing is covered or clipped;
+* a real mouse click (not `BM_CLICK`) on the button, which is how a user would press it.
+
+What could still read as "it does nothing" is the gesture itself: **the write target is the lit
+button and it does not move when the region does**, so saving twice in a row overwrites the same slot
+and produces no visible change at all. The status line now says where the save went
+(`已保存到选区 2`), which is the only feedback this gesture has, and both readmes explain that a
+different slot means clicking its number first. If the report meant something else, the remaining
+suspects are a magnifier window covering the settings window (it is topmost, and a click that lands
+on it drags it instead of pressing the button) and a saved region that is no longer on the desktop
+after a display change.
 
 ## The shape-and-mouse revision (2026-09-19)
 

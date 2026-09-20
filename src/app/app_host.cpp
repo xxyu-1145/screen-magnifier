@@ -1055,9 +1055,15 @@ void AppHost::recall_selection_slot(int index) {
 
 void AppHost::save_selection_slot() {
     if (!selection_) return;
+    // The write target is whichever slot is lit, and it does not move when the
+    // region does. Saving twice in a row therefore overwrites the same slot and
+    // looks like nothing happened at all, so the status line says where the
+    // region went: the number is the only feedback this gesture has.
     const int index = config_.selection_slot >= 0 ? config_.selection_slot : 0;
     config_.selection_slots[index] = selection_->current();
     config_.selection_slot = index;
+    notice_ = Notice{Str::SelectionSaved, std::to_string(index + 1)};
+    refresh_status();
     save_config();
     ui_dirty_ = true;
 }
