@@ -1,12 +1,12 @@
 # Status
 
-_Last updated: 2026-10-26, after the short-screen usability revision._
+_Last updated: 2026-11-01, on releasing 1.0.4._
 
 ## Where the project stands
 
 The application is **built, packaged and verified**. `./build.sh package` produces
 `dist/ScreenMagnifier.exe` (1.3 MB, icon and manifest embedded, no runtime DLLs) and
-`dist/ScreenMagnifier-1.0.3.zip` (0.5 MB, the executable plus a Chinese readme) — the second is what
+`dist/ScreenMagnifier-1.0.4.zip` (0.5 MB, the executable plus a Chinese readme) — the second is what
 gets sent to someone.
 
 ```
@@ -37,7 +37,7 @@ tests:      ./build.sh test
 | `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor; every shape survives the window being shrunk to 406×305 — judged on the shape's **interior** since 2026-10-26 (the masked rim shows whatever the desktop has behind the window, which is not the app's business) |
 | `measure_perf.py` | idle 43.9 MB / 0.00 % CPU; running **4.69 %** CPU (gate < 10 %); released to 3.1 MB when switched off |
 | `verify_stress.py` | 15 show/hide cycles, frames climbing; `WM_DISPLAYCHANGE` acknowledged |
-| `verify_package.py` | **not rerun this revision**: `dist/` still holds the released 1.0.3 artifacts and repackaging is left to the next release |
+| `verify_package.py` | **PASS** on the repackaged 1.0.4 archive: 13 real imports all ship with Windows, it launches from a Chinese path with a space, renders, and exits 0 |
 | `tools/check_resources.py` | 7 icons, group icon 1, manifest 1; the shell reports the icon |
 
 ## The resolution-adaptation revision (2026-10-25)
@@ -118,8 +118,8 @@ the desktop is disrupted while it runs.
 
 The rotation path is unchanged and still unverified (see known gaps): every rung here runs at
 orientation 0. The DPI-only branch (`WM_DPICHANGED` without a mode change) has no automated
-coverage — see above. `dist/` still holds the released 1.0.3 artifacts; repackaging is deliberately
-left to the next release.
+coverage — see above. `dist/` holds the released 1.0.4 artifacts, repackaged and re-verified with
+`verify_package.py` as part of the release.
 
 Two measurement notes from this revision, both environment rather than product:
 
