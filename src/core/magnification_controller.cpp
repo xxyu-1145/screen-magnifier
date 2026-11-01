@@ -2,6 +2,7 @@
 // the source-to-window viewport mapping (design doc §3.2 and §5.4).
 #include "core/magnification_controller.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <limits>
@@ -120,6 +121,19 @@ SizePx default_output_size(const SelectionConfig& sel, Q16 factor) noexcept {
     const Px h = height_of(sel.bounds_px);
     if (w <= 0 || h <= 0) return SizePx{0, 0};
     return SizePx{scale_px(w, factor), scale_px(h, factor)};
+}
+
+SizePx first_run_output_size(SizePx shipped_default, SizePx desktop_px) noexcept {
+    const double w = static_cast<double>(shipped_default.width);
+    const double h = static_cast<double>(shipped_default.height);
+    if (w <= 0.0 || h <= 0.0 || desktop_px.width <= 0 || desktop_px.height <= 0) {
+        return shipped_default;
+    }
+    const double desk_w = static_cast<double>(desktop_px.width);
+    const double desk_h = static_cast<double>(desktop_px.height);
+    const double scale = std::min({1.0, desk_w * 2.0 / 3.0 / w, desk_h * 2.0 / 3.0 / h});
+    return SizePx{std::max<Px>(kMinOutputEdgePx, static_cast<Px>(w * scale)),
+                  std::max<Px>(kMinOutputEdgePx, static_cast<Px>(h * scale))};
 }
 
 Q16 ladder_step(Q16 current, int direction) noexcept {
@@ -332,6 +346,30 @@ void MagnificationController::set_virtual_bounds(RectPx virtual_bounds_px) {
     // degenerate; keeping the previous bounds beats parking the window at 0,0.
     if (is_empty(bounds)) return;
     virtual_bounds_px_ = bounds;
+    clamp_position();
+    publish_current();
+}
+
+void MagnificationController::shrink_into_virtual_bounds() {
+    const Px max_w = width_of(virtual_bounds_px_);
+    const Px max_h = height_of(virtual_bounds_px_);
+    const SizePx size = config_.output_size_px;
+    if (size.width <= max_w && size.height <= max_h) return;
+    // Both axes shrink by the same factor, so the aperture keeps its shape and
+    // nothing about the factor -- which is independent of the window size --
+    // changes. This is the live counterpart of validate()'s startup clamp: a
+    // display that shrank underneath a running window cannot hold it.
+    const double w = static_cast<double>(size.width);
+    const double h = static_cast<double>(size.height);
+    const double scale = std::min(static_cast<double>(max_w) / w,
+                                  static_cast<double>(max_h) / h);
+    const Px min_w = std::min(kMinOutputEdgePx, max_w);
+    const Px min_h = std::min(kMinOutputEdgePx, max_h);
+    const SizePx shrunk{clamp_px(static_cast<Px>(w * scale), min_w, max_w),
+                        clamp_px(static_cast<Px>(h * scale), min_h, max_h)};
+    const PointPx top_left = centred_top_left(output_rect(), shrunk);
+    config_.output_size_px = shrunk;
+    output_position_px_ = top_left;
     clamp_position();
     publish_current();
 }

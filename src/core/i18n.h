@@ -116,6 +116,8 @@ enum class Language : std::uint32_t { Chinese = 0, English = 1 };
     X(CaptureLost, "捕获丢失，正在尝试恢复", "capture lost, attempting to recover")      \
     X(RendererUnavailable, "渲染器不可用：", "renderer unavailable: ")                   \
     X(SettingsRestored, "配置文件无法使用，已恢复默认", "config unusable, defaults restored") \
+    X(ConfigUnreadable, "配置文件无法读取，已恢复默认：",                                  \
+      "config file unreadable, defaults restored: ")                                      \
     X(HotkeyConflict, "部分快捷键已被其他程序占用", "some hotkeys are owned by another app") \
     X(HotkeyTakenOver, "部分快捷键原被其他程序占用，已由本程序接管",                            \
                        "some hotkeys were owned by another app; taken over")              \

@@ -601,13 +601,19 @@ struct RenderService::Impl {
         return hr;
     }
 
-    void release_all() noexcept {
+    void release_all(bool retire_backends = true) noexcept {
         // Hand the textures back through their owner before dropping the
         // device, so the backend's cache never outlives the device that opened
         // it. The texture pointers themselves are borrowed and must not be
-        // released here.
-        for (auto* backend : cfg.captures) {
-            if (backend) backend->release_all_textures();
+        // released here. Destruction passes false: by the time the service is
+        // destroyed its capture group may already have been rebuilt out from
+        // under it (a live display-mode change), so cfg.captures can be
+        // dangling -- and a backend drops its own cache when it is destroyed,
+        // so nothing is lost by skipping.
+        if (retire_backends) {
+            for (auto* backend : cfg.captures) {
+                if (backend) backend->release_all_textures();
+            }
         }
         for (auto* mutex : tile_mutexes) {
             if (mutex) mutex->Release();
@@ -862,7 +868,12 @@ struct RenderService::Impl {
             params.mask_rect[3] = static_cast<float>(mask_rect.bottom);
             params.shape_params[0] = shape_id;
             params.shape_params[1] = corner_px;
-            params.shape_params[2] = static_cast<float>(cfg.show_border ? 2 : 0);
+            // The border is a feel constant: 2 px at 100 % scaling, scaled
+            // with the monitor the window sits on.
+            params.shape_params[2] =
+                cfg.show_border
+                    ? static_cast<float>(::MulDiv(2, ::GetDpiForWindow(cfg.hwnd), 96))
+                    : 0.0f;
             params.shape_params[3] = bicubic ? 1.0f : 0.0f;
             params.viewport_size[0] = static_cast<float>(client_w);
             params.viewport_size[1] = static_cast<float>(client_h);
@@ -953,7 +964,7 @@ RenderService::RenderService(const Config& cfg, SnapshotMailbox& mailbox)
 }
 
 RenderService::~RenderService() {
-    impl_->release_all();
+    impl_->release_all(false);
 }
 
 void RenderService::submit_snapshot(const RenderSnapshot& snapshot) noexcept {

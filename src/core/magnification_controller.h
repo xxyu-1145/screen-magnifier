@@ -35,6 +35,13 @@ ViewportMapping compute_viewport(const SelectionConfig& sel,
 // default relationship between selection size and window size.
 SizePx default_output_size(const SelectionConfig& sel, Q16 factor) noexcept;
 
+// Scales a first-run output window down to at most two thirds of the desktop,
+// both axes by the same factor so the aperture keeps its proportions (the
+// shipped 1280x960 default is more than a small laptop can show at once).
+// Returns the size unchanged when it already fits; a stored config never
+// passes through here -- validate() owns that path.
+SizePx first_run_output_size(SizePx shipped_default, SizePx desktop_px) noexcept;
+
 class MagnificationController {
 public:
     // Throws std::invalid_argument when `virtual_bounds_px` is empty.
@@ -57,6 +64,11 @@ public:
     void set_output_position(PointPx top_left_px);
     void center_on(RectPx monitor_rect_px);
     void set_virtual_bounds(RectPx virtual_bounds_px);
+
+    // Scales an output window larger than the virtual desktop down until it
+    // fits, both axes by the same factor so the aperture keeps its shape. The
+    // magnification factor is untouched. No-op when the window already fits.
+    void shrink_into_virtual_bounds();
 
     // Recomputes the window size from the current selection and factor.
     // Used when the selection changes while "size follows source" is active.

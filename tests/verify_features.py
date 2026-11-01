@@ -541,28 +541,43 @@ def main() -> int:
                 return lowest
 
             before_low = lowest_control()
-            grow_w, grow_h = wide + 320, tall + 90
-            u.SetWindowPos(ch, None, cx0, cy0, grow_w, grow_h,
+            # Growing needs room the desktop may not have: on a portrait
+            # screen the settings window can already be nearly work-area wide,
+            # and the system clamps a larger request to the max track size.
+            # Width is optional for this check -- a taller window alone still
+            # exercises the reflow, and there is usually vertical room.
+            room_w = (work.right - work.left) - wide
+            room_h = (work.bottom - work.top) - tall
+            if room_h >= 120:
+                target_w = wide + 320 if room_w >= 360 else wide
+                target_h = tall + (90 if room_w >= 360 else 240)
+                direction = "grow"
+            else:
+                target_w, target_h = max(600, wide - 260), max(400, tall - 90)
+                direction = "shrink"
+            u.SetWindowPos(ch, None, cx0, cy0, target_w, target_h,
                            0x0004 | 0x0010 | 0x0002)          # NOZORDER|NOACTIVATE|NOMOVE
             time.sleep(1.5)
             after = wt.RECT()
             u.GetWindowRect(ch, ctypes.byref(after))
-            grew = (after.right - after.left) >= grow_w - 8
+            took = (abs((after.right - after.left) - target_w) <= 8
+                    and abs((after.bottom - after.top) - target_h) <= 8)
             spill = escaped_controls()
             after_low = lowest_control()
-            print(f"    resized to {after.right-after.left}x{after.bottom-after.top}; "
+            print(f"    {direction} to {after.right-after.left}x{after.bottom-after.top}; "
                   f"controls outside the client area: {len(spill)}")
             print(f"    controls reached {before_low}px down before, {after_low}px after")
-            if not grew:
+            if not took:
                 print("    FAIL: the window did not take the new size")
                 failures += 1
             elif spill:
                 print(f"    FAIL: resizing pushed controls out of view: {spill[:4]}")
                 failures += 1
-            elif after_low <= before_low:
-                # The complaint this check exists for: the window could be made
-                # taller and nothing inside it moved.
-                print("    FAIL: a taller window left the arrangement unchanged")
+            elif after_low == before_low:
+                # The complaint this check exists for: the window could be
+                # resized and nothing inside it moved. Shrinking counts too --
+                # the footer walks up the client area.
+                print("    FAIL: a resized window left the arrangement unchanged")
                 failures += 1
             else:
                 print("    PASS: it resizes and the layout reflows to fit")
@@ -729,7 +744,10 @@ def main() -> int:
                 unlocked_ok = True
                 # And with the lock off, the same edit moves only that axis --
                 # otherwise "keep aspect" would be a label that does nothing.
-                click(keep_box)
+                # BM_CLICK rather than a synthetic button-down/up: the
+                # owner-drawn checkbox occasionally ignored the synthesized
+                # pair, which read as the lock doing nothing.
+                u.SendMessageW(keep_box, 0x00F5, 0, 0)       # BM_CLICK
                 time.sleep(0.5)
                 click(width_box)
                 u.SendMessageW(width_box, 0x00B1, 0, -1)
@@ -740,11 +758,42 @@ def main() -> int:
                 time.sleep(1.6)
                 free = window_rect()
                 free_size = (free[2] - free[0], free[3] - free[1])
+                print(f"    lock off, typed 900 -> {free_size} "
+                      f"(one axis only wants ({900}, {got[1]}))")
                 unlocked_ok = free_size == (900, got[1])
-                click(keep_box)                              # back on, as shipped
+                u.SendMessageW(keep_box, 0x00F5, 0, 0)       # BM_CLICK: back on
                 time.sleep(0.5)
 
-                if got == wanted and unlocked_ok:
+                # An oversized typed size clamps to the desktop rather than
+                # being silently dropped: the controller used to reject it
+                # downstream and Apply did nothing at all. Both axes clamp,
+                # so the expectation is the ratio-preserving size that fits
+                # the desktop (either axis can be the binding one).
+                click(width_box)
+                u.SendMessageW(width_box, 0x00B1, 0, -1)
+                for _ in range(5):
+                    tap(0x39)                                # "99999"
+                time.sleep(0.4)
+                click(apply_button)
+                time.sleep(1.6)
+                huge = window_rect()
+                huge_size = (huge[2] - huge[0], huge[3] - huge[1])
+                desk_w = u.GetSystemMetrics(78)              # SM_CXVIRTUALSCREEN
+                desk_h = u.GetSystemMetrics(79)              # SM_CYVIRTUALSCREEN
+                cur = free_size if unlocked_ok else got
+                scale = min(desk_w / cur[0], desk_h / cur[1]) if cur[0] and cur[1] else 0
+                fit = (int(round(cur[0] * scale)), int(round(cur[1] * scale)))
+                clamped = (abs(huge_size[0] - fit[0]) <= 2
+                           and abs(huge_size[1] - fit[1]) <= 2)
+                print(f"    typed 99999 -> {huge_size} "
+                      f"(the desktop is {desk_w}x{desk_h}; the ratio asks {fit})")
+                if not clamped:
+                    print("    FAIL: an oversized typed size did not clamp into the desktop")
+                    failures += 1
+                else:
+                    print("    PASS: an oversized typed size clamps into the desktop")
+
+                if got == wanted and unlocked_ok and clamped:
                     print("    PASS: the ratio is kept on one axis, and only when it is on")
                 else:
                     print("    FAIL: the ratio lock did not do what it says")
@@ -965,6 +1014,74 @@ def main() -> int:
                     else:
                         print("    PASS: the interface is in one language, freshly painted")
 
+        # --- 16. a settings window shorter than its content scrolls ------------
+        #
+        # A work area shorter than the natural layout used to strand the
+        # footer's buttons below the fold, with WM_GETMINMAXINFO forbidding the
+        # only height that fit. The window now scrolls as one unit, and its
+        # minimum height is a floor rather than the natural layout.
+        print("\n[16] a settings window shorter than its content scrolls to its buttons")
+
+        class MINMAXINFO(ctypes.Structure):
+            _fields_ = [("ptReserved", wt.POINT), ("ptMaxSize", wt.POINT),
+                        ("ptMaxPosition", wt.POINT), ("ptMinTrackSize", wt.POINT),
+                        ("ptMaxTrackSize", wt.POINT)]
+
+        class SCROLLINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("fMask", wt.DWORD), ("nMin", ctypes.c_int),
+                        ("nMax", ctypes.c_int), ("nPage", wt.UINT), ("nPos", ctypes.c_int),
+                        ("nTrackPos", ctypes.c_int)]
+
+        settings_h = win(p.pid)
+        start_btn = find_child(p.pid, 1301)          # kIdStartStop
+        if settings_h is None or start_btn is None:
+            print("    FAIL: the settings window or the start button was not found")
+            failures += 1
+        else:
+            orig = wt.RECT()
+            u.GetWindowRect(settings_h, ctypes.byref(orig))
+            mmi = MINMAXINFO()
+            u.SendMessageW(settings_h, 0x0024, 0, ctypes.byref(mmi))    # WM_GETMINMAXINFO
+            floor = mmi.ptMinTrackSize.y
+            # Shrink to the smallest frame the window allows: the layout is
+            # taller than that, so a scrollbar must appear.
+            u.SetWindowPos(settings_h, None, 0, 0, orig.right - orig.left, floor,
+                           0x0002 | 0x0004 | 0x0010)
+            time.sleep(1.2)
+            si = SCROLLINFO()
+            si.cbSize = ctypes.sizeof(si)
+            si.fMask = 0x17                         # SIF_ALL
+            have = u.GetScrollInfo(settings_h, 1, ctypes.byref(si))     # SB_VERT
+            scrollable = bool(have) and si.nMax > si.nPage
+            print(f"    shrunk to the {floor}px floor: scroll range {si.nMin}..{si.nMax}, "
+                  f"page {si.nPage}")
+            # The footer lives at the bottom of the content: scroll there and
+            # the start button has to be inside the client area.
+            u.SendMessageW(settings_h, 0x0115, 7, 0)                    # WM_VSCROLL SB_BOTTOM
+            time.sleep(0.8)
+            btn = wt.RECT()
+            u.GetWindowRect(start_btn, ctypes.byref(btn))
+            pt = wt.POINT(btn.left + 2, btn.top + 2)
+            u.ScreenToClient(settings_h, ctypes.byref(pt))
+            client = wt.RECT()
+            u.GetClientRect(settings_h, ctypes.byref(client))
+            reachable = 0 <= pt.x < client.right and 0 <= pt.y < client.bottom
+            # And the button really works from all the way down there.
+            u.SendMessageW(start_btn, 0x00F5, 0, 0)                     # BM_CLICK
+            time.sleep(2.0)
+            ov = windows(p.pid, "MagOverlayWindow")
+            shown = bool(ov) and ov[0][1]
+            press(p.pid, TOGGLE, settle=1.2)                            # back off
+            # Put the window back the way [9] left it.
+            u.SetWindowPos(settings_h, None, 0, 0, orig.right - orig.left,
+                           orig.bottom - orig.top, 0x0002 | 0x0004 | 0x0010)
+            time.sleep(0.5)
+            if scrollable and reachable and shown:
+                print("    PASS: the scrollbar appears, the buttons are reachable, and they work")
+            else:
+                print(f"    FAIL (scrollbar={scrollable} reachable={reachable} works={shown})")
+                failures += 1
+
         press(p.pid, QUIT, settle=1.0)
         try:
             code = p.wait(timeout=10)
@@ -984,6 +1101,51 @@ def main() -> int:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
+
+    # --- 15. a corrupt config file says so, and heals -----------------------
+    #
+    # ConfigStore::last_error() used to have no reader: a file that could not
+    # be opened or parsed silently reverted every setting to its default,
+    # which reads to a user as "my settings vanished". The status line now
+    # names the failure, and the first save rewrites valid JSON over the
+    # damage.
+    print("\n[15] a corrupt config file says so, and heals")
+    CONFIG.write_text("{ this is not json", encoding="utf-8")
+    p2 = subprocess.Popen([str(EXE)], cwd=str(ROOT))
+    try:
+        for _ in range(80):
+            time.sleep(0.25)
+            if p2.poll() is not None:
+                break
+            if windows(p2.pid, "MagControlWindow"):
+                break
+        time.sleep(2.0)
+        st = status_line(p2.pid)
+        said = "配置文件无法读取" in st or "config file unreadable" in st
+        print(f"    the status line names the failure: {said}")
+        press(p2.pid, ZOOM_IN, settle=1.5)     # a hotkey forces a config save
+        time.sleep(1.0)
+        healed = False
+        try:
+            json.loads(CONFIG.read_text(encoding="utf-8"))
+            healed = True
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"    the first save rewrites valid JSON: {healed}")
+        press(p2.pid, QUIT, settle=1.0)
+        try:
+            code = p2.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            p2.terminate()
+            code = -1
+        if not said or not healed or code != 0:
+            print(f"    FAIL (said={said} healed={healed} exit={code}; status: {st[:140]})")
+            failures += 1
+        else:
+            print("    PASS")
+    finally:
+        if p2.poll() is None:
+            p2.terminate()
 
     print("\n" + "=" * 50)
     print("PASS" if failures == 0 else f"FAIL: {failures} problem(s)")

@@ -388,6 +388,11 @@ public:
 
 private:
     static constexpr int kMaxDepth = 32;
+    // Depth bounds the recursion; this bounds the graph. A 16 MB file of `0,`
+    // pairs is a few million values, which the byte budget alone would happily
+    // expand into memory. Real configs use a few hundred.
+    static constexpr std::size_t kMaxValues = std::size_t{1} << 20;
+    std::size_t values_read_{0};
 
     bool at(char c) const noexcept { return pos_ < text_.size() && text_[pos_] == c; }
 
@@ -397,6 +402,7 @@ private:
 
     bool read_value(JsonValue& out, int depth) {
         if (depth > kMaxDepth || pos_ >= text_.size()) return false;
+        if (++values_read_ > kMaxValues) return false;
         switch (text_[pos_]) {
             case '{': return read_object(out, depth);
             case '[': return read_array(out, depth);
@@ -824,6 +830,26 @@ AppConfig AppConfig::defaults() noexcept {
     return config;
 }
 
+// A hand-edited file can name edges whose *span* overflows Px even though each
+// edge fits (INT32_MIN..INT32_MAX). Every width_of()/height_of() computed from
+// such a rect is undefined before any clamp runs, so the edges are pinned into
+// a band around the desktop first: a megapixel beyond the nearest desktop edge
+// is already nonsense the clamps below would pin anyway, and inside the band
+// every span is comfortably representable.
+constexpr RectPx sanitize_rect_edges(const RectPx& r, const RectPx& desktop) noexcept {
+    constexpr Px kMargin = 1'000'000;
+    const Px lo_x = desktop.left - kMargin;
+    const Px hi_x = desktop.right + kMargin;
+    const Px lo_y = desktop.top - kMargin;
+    const Px hi_y = desktop.bottom + kMargin;
+    RectPx out = r;
+    out.left = out.left < lo_x ? lo_x : (hi_x < out.left ? hi_x : out.left);
+    out.right = out.right < lo_x ? lo_x : (hi_x < out.right ? hi_x : out.right);
+    out.top = out.top < lo_y ? lo_y : (hi_y < out.top ? hi_y : out.top);
+    out.bottom = out.bottom < lo_y ? lo_y : (hi_y < out.bottom ? hi_y : out.bottom);
+    return out;
+}
+
 bool validate(AppConfig& cfg, const RectPx& virtual_desktop_px) noexcept {
     const RectPx desktop = normalize(virtual_desktop_px);
     // Only a degenerate desktop is unusable: the controller cannot place a
@@ -833,7 +859,8 @@ bool validate(AppConfig& cfg, const RectPx& virtual_desktop_px) noexcept {
     const Px max_w = larger(kMinOutputEdgePx, width_of(desktop));
     const Px max_h = larger(kMinOutputEdgePx, height_of(desktop));
 
-    cfg.selection_bounds_px = clamp_into(normalize(cfg.selection_bounds_px), desktop);
+    cfg.selection_bounds_px =
+        clamp_into(normalize(sanitize_rect_edges(cfg.selection_bounds_px, desktop)), desktop);
     cfg.selection_corner_radius_px =
         clamp_corner_radius(cfg.selection_corner_radius_px, cfg.selection_bounds_px);
 
@@ -847,7 +874,7 @@ bool validate(AppConfig& cfg, const RectPx& virtual_desktop_px) noexcept {
             slot = SelectionConfig{cfg.selection_bounds_px, cfg.selection_shape,
                                    cfg.selection_corner_radius_px};
         }
-        slot.bounds_px = clamp_into(normalize(slot.bounds_px), desktop);
+        slot.bounds_px = clamp_into(normalize(sanitize_rect_edges(slot.bounds_px, desktop)), desktop);
         const int shape_value = static_cast<int>(slot.shape);
         if (shape_value < 0 ||
             shape_value > static_cast<int>(SelectionShape::RoundedRectangle)) {

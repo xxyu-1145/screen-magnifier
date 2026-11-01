@@ -11,7 +11,7 @@ predates C++20 and ships no `windows.h`. Build with the clang bundled in the `zi
 ```bash
 ./build.sh package      # dist/ScreenMagnifier.exe + the .zip  (the shippable artifacts)
 ./build.sh release      # build/magnifier.exe
-./build.sh test         # 2809 core unit checks
+./build.sh test         # 3503 core unit checks
 ./build.sh console      # same as release, keeps a console attached
 ```
 
@@ -21,9 +21,11 @@ Acceptance harnesses, each of which launches the real executable:
 python tests/verify_package.py    # the shipped .zip: unpack it, run it, magnify something
 python tests/verify_features.py   # shipped defaults: language, centring, 10x cap, slider, reset
 python tests/verify_picker.py     # region picker: move, confirm button, double click, Enter
-python tests/verify_runtime.py    # 17 black-box acceptance checks
+python tests/verify_runtime.py    # 22 black-box acceptance checks
 python tests/verify_visual.py     # pixel-exact magnification, all four shapes
 python tests/verify_stress.py     # show/hide races and WM_DISPLAYCHANGE
+python tests/verify_resolutions.py  # real display-mode ladder + live mode changes; disrupts the desktop
+python tests/verify_rotation.py     # pixel-exact under the live orientation; --sweep rotates the display
 python tests/measure_perf.py      # the resource budgets
 python tests/profile_cpu.py       # attributes CPU to window / capture / renderer
 python tools/check_resources.py   # what the shell sees in a built executable
@@ -48,8 +50,16 @@ python tools/check_resources.py   # what the shell sees in a built executable
 
 - `README.md` explains the design and the reasoning behind it.
 - `docs/STATUS.md` is the current state: what was fixed and why, and the list of known gaps.
-- **The display on this machine is rotated (portrait).** Anything that samples a captured frame must
-  honour `GpuFrame::rotation`; a regression there is invisible on a landscape screen and total here.
+- **Honour `GpuFrame::rotation`, and re-measure the display before trusting a green pixel test.**
+  Desktop Duplication returns frames in the monitor's *native* orientation, so on a pivoted display
+  every pixel comes from the wrong place unless the compensation runs — invisible on a landscape
+  screen, total on a pivoted one. The machine has two states (external `2560x1440` @ 180 Hz,
+  orientation 0, 125 % scaling; internal `1600x2560` @ 165 Hz, orientation 270), and which one is
+  active decides what a run covers, so re-measure first. Coverage as of 2026-10-25: rotation 0 by
+  every pixel harness, **90 and 270 pixel-exact via `python tests/verify_rotation.py`** (add
+  `--sweep` to rotate the live display through the other orientations and restore afterwards);
+  **180 is refused by this panel's driver** (`DISP_CHANGE_FAILED`) and stays unverified. Do not
+  read any automated result as covering a pivoted display unless that is how it actually ran.
 - The settings window paints through GDI+ (`src/app/ui_draw.*`). Do not put `WS_EX_COMPOSITED` back:
   it recomposites the whole window and every child on any invalidation, and cost ~8 % of a core on
   its own. `WS_CLIPCHILDREN` plus a diff-based `sync()` are what actually prevent flicker.

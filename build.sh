@@ -52,7 +52,7 @@ COMMON=(
 LIBS=(
   -ld3d11 -ldxgi -ldcomp -lgdiplus
   -luser32 -lgdi32 -ldwmapi -lshell32 -lole32 -lshcore
-  -lcomctl32 -lmsimg32 -luxtheme -ladvapi32 -lwinmm
+  -lcomctl32 -lmsimg32 -luxtheme -ladvapi32 -lwinmm -ldbghelp
 )
 
 SOURCES=(
@@ -117,9 +117,12 @@ case "$MODE" in
     echo "built $BUILD/magnifier.exe"
     ;;
   console)
-    # Same as release but keeps a console attached, for diagnostics.
+    # Same as release but keeps a console attached, for diagnostics. The debug
+    # info stays in the file so a crash minidump can be symbolised offline, and
+    # the canary allocator turns silent heap corruption into a loud report.
     echo "== console build =="
-    "$ZIG" "${COMMON[@]}" -O2 -DNDEBUG=1 "${SOURCES[@]}" \
+    "$ZIG" "${COMMON[@]}" -O2 -g -DNDEBUG=1 -DMAG_DEBUG_HEAP=1 "${SOURCES[@]}" \
+      "$ROOT/src/app/debug_heap.cpp" \
       -o "$BUILD/magnifier_console.exe" "${LIBS[@]}"
     embed_resources "$BUILD/magnifier_console.exe"
     echo "built $BUILD/magnifier_console.exe"

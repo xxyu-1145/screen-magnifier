@@ -261,12 +261,18 @@ def mean_abs_diff(a: Image.Image, b: Image.Image) -> float:
 
 
 def shape_at(shot: Image.Image, rect: tuple[int, int, int, int], factor: float):
-    """The window's content, and how far its corners are from showing any.
+    """The window's content, how far its corners are from showing any, and how
+    well the interior matches.
 
-    The expectation is the desktop magnified by exactly `factor`, centred on the
-    region, which is what the viewport shows at *any* window size. Corners that
-    match it are showing content; corners that do not have been masked away, and
-    that is what says the shape is still a shape.
+    The expectation is the desktop magnified by exactly `factor`, centred on
+    the region, which is what the viewport shows at *any* window size. Corners
+    that match it are showing content; corners that do not have been masked
+    away, and that is what says the shape is still a shape. The interior metric
+    samples the central 60 % -- inside any inscribed shape -- because the
+    masked rim is transparent and shows whatever the desktop happens to have
+    behind the window: wallpaper, icons, whatever moved there since the last
+    run. Mixing that into the average made the verdict depend on the
+    housekeeping state of the desktop rather than on the mask.
     """
     wx0, wy0, wx1, wy1 = rect
     ww, wh = wx1 - wx0, wy1 - wy0
@@ -281,7 +287,10 @@ def shape_at(shot: Image.Image, rect: tuple[int, int, int, int], factor: float):
         e = expected.getpixel((int(ww * fx), int(wh * fy)))
         a = actual.getpixel((int(ww * fx), int(wh * fy)))
         corners += sum(abs(e[i] - a[i]) for i in range(3))
-    return mean_abs_diff(expected, actual), corners
+    mx0, my0 = int(ww * 0.2), int(wh * 0.2)
+    interior = mean_abs_diff(expected.crop((mx0, my0, mx0 + int(ww * 0.6), my0 + int(wh * 0.6))),
+                             actual.crop((mx0, my0, mx0 + int(ww * 0.6), my0 + int(wh * 0.6))))
+    return interior, corners
 
 
 def run_case(shape: str) -> bool:
@@ -379,12 +388,12 @@ def run_case(shape: str) -> bool:
                 return False
             ww, wh = small[2] - small[0], small[3] - small[1]
             shot = ImageGrab.grab(all_screens=True).convert("RGB")
-            whole, corners = shape_at(shot, small, FACTOR)
+            interior, corners = shape_at(shot, small, FACTOR)
             small_masked = corners > 120
-            small_ok = (small_masked == (shape != "Rectangle")) and whole < 60
+            small_ok = (small_masked == (shape != "Rectangle")) and interior < 60
             print(f"  shrunk to {ww}x{wh}: corners "
                   f"{'still masked away' if small_masked else 'showing content'} "
-                  f"(diff {corners}), whole window {whole:.1f} per channel")
+                  f"(diff {corners}), interior {interior:.1f} per channel")
             if not small_ok:
                 print("    FAIL: the shape did not survive the window being made small")
             ok = ok and small_ok

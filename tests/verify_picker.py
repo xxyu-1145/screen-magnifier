@@ -90,8 +90,19 @@ def selection():
         return None
 
 
+def muldiv(value, dpi, base=96):
+    """kernel32.MulDiv -- the same rounding the app's font height uses."""
+    return k.MulDiv(value, dpi, base)
+
+
 def measure(text, face="Microsoft YaHei UI", height=-14):
-    """Text extent, the same way the picker measures it."""
+    """Text extent, the same way the picker measures it.
+
+    `height` must be the DPI-scaled negative pixel height the picker itself
+    draws with (-- MulDiv(14, dpi, 96) since the picker fonts grew with the
+    monitor), or every rectangle this function predicts sits too high and too
+    far right on a scaled display.
+    """
     dc = gdi.CreateCompatibleDC(None)
     font = gdi.CreateFontW(height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, face)
     old = gdi.SelectObject(dc, font)
@@ -103,11 +114,12 @@ def measure(text, face="Microsoft YaHei UI", height=-14):
     return size.cx, size.cy
 
 
-def confirm_button_centre(client_w, client_h, hint, ok_text, cancel_text):
+def confirm_button_centre(client_w, client_h, dpi, hint, ok_text, cancel_text):
     """Where draw_hint_bar() puts the confirm button, in client coordinates."""
-    hint_cx, hint_cy = measure(hint)
-    ok_cx, _ = measure(ok_text)
-    cancel_cx, _ = measure(cancel_text)
+    font_h = -muldiv(14, dpi)
+    hint_cx, hint_cy = measure(hint, height=font_h)
+    ok_cx, _ = measure(ok_text, height=font_h)
+    cancel_cx, _ = measure(cancel_text, height=font_h)
 
     pad, gap, button_pad = 16, 14, 22
     ok_w = max(84, ok_cx + 2 * button_pad)
@@ -178,10 +190,11 @@ def main() -> int:
         ph, _, prect = entry
         cw, ch = prect[2] - prect[0], prect[3] - prect[1]
         drag(ph, 400, 300, 780, 620)
-        bx, by = confirm_button_centre(cw, ch, "", "", "")
+        dpi = u.GetDpiForWindow(ph)
+        bx, by = confirm_button_centre(cw, ch, dpi, "", "", "")
         # The hint string is only used for its width; measure the real one.
         bx, by = confirm_button_centre(
-            cw, ch,
+            cw, ch, dpi,
             "拖动框选 · 方向键微调 · 1-4 或 Tab 换形状 · Enter 确认 · Esc 取消",
             "确定", "取消")
         print(f"    confirm button at client ({bx},{by}) of {cw}x{ch}")

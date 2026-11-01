@@ -1022,6 +1022,89 @@ void test_ratio_lock() {
     CHECK(m.current().output_size_px == (mag::SizePx{1280, 720}));
 }
 
+void test_display_adaptation() {
+    // First-run default size: unchanged where the desktop is generous, scaled
+    // by the same factor on both axes where it is not.
+    CHECK(mag::first_run_output_size(mag::SizePx{1280, 960}, mag::SizePx{2560, 1440}) ==
+          (mag::SizePx{1280, 960}));
+    const mag::SizePx at_1080p = mag::first_run_output_size(mag::SizePx{1280, 960},
+                                                            mag::SizePx{1920, 1080});
+    CHECK(at_1080p.width == 960);
+    CHECK(at_1080p.height == 720);
+    const mag::SizePx at_768p = mag::first_run_output_size(mag::SizePx{1280, 960},
+                                                           mag::SizePx{1366, 768});
+    // Two thirds of 768 is 512, so the height is the binding axis (512/960).
+    CHECK(at_768p.height == 512);
+    CHECK(at_768p.width == static_cast<Px>(1280.0 * 512.0 / 960.0));
+    // A desktop smaller than the minimum edge still yields a usable window.
+    const mag::SizePx tiny = mag::first_run_output_size(mag::SizePx{1280, 960},
+                                                        mag::SizePx{640, 480});
+    CHECK(tiny.width >= mag::kMinOutputEdgePx);
+    CHECK(tiny.height >= mag::kMinOutputEdgePx);
+    CHECK(tiny.width <= 640);
+    CHECK(tiny.height <= 480);
+    // Degenerate input passes through untouched.
+    CHECK(mag::first_run_output_size(mag::SizePx{0, 0}, mag::SizePx{1920, 1080}) ==
+          (mag::SizePx{0, 0}));
+
+    // A window the desktop shrank underneath is scaled back into it, both axes
+    // by the same factor, with the magnification factor itself untouched.
+    RecordingBus bus;
+    mag::MagnificationController m(bus, mk(0, 0, 2560, 1440));
+    m.resize_output(mag::SizePx{1280, 960});
+    const Q16 factor_before = m.current().factor_q16;
+    m.set_virtual_bounds(mk(0, 0, 1366, 768));
+    m.shrink_into_virtual_bounds();
+    CHECK(m.current().output_size_px.width == 1024);  // 1280 * 768/960
+    CHECK(m.current().output_size_px.height == 768);
+    CHECK(m.current().factor_q16 == factor_before);
+    CHECK(m.output_rect().right <= 1366);
+    CHECK(m.output_rect().bottom <= 768);
+
+    // A window that already fits is left alone.
+    mag::MagnificationController fits(bus, mk(0, 0, 2560, 1440));
+    fits.resize_output(mag::SizePx{800, 600});
+    fits.set_virtual_bounds(mk(0, 0, 1366, 768));
+    fits.shrink_into_virtual_bounds();
+    CHECK(fits.current().output_size_px == (mag::SizePx{800, 600}));
+}
+
+void test_hostile_config_input() {
+    const RectPx desktop{0, 0, 1920, 1080};
+
+    // Edges that each fit Px but whose span overflows it: every width_of() on
+    // the raw rect is undefined, so validate() pins the edges into a band
+    // around the desktop before any clamp arithmetic runs.
+    mag::AppConfig cfg = mag::AppConfig::defaults();
+    const RectPx hostile{INT32_MIN, INT32_MIN, INT32_MAX, INT32_MAX};
+    cfg.selection_bounds_px = hostile;
+    for (mag::SelectionConfig& slot : cfg.selection_slots) slot.bounds_px = hostile;
+    CHECK(mag::validate(cfg, desktop));
+    // Pinned into the band, then clamped: clamp_into slides an oversized rect
+    // to the origin edge keeping its (now representable) span.
+    CHECK(cfg.selection_bounds_px.left == 0 && cfg.selection_bounds_px.top == 0);
+    CHECK(mag::width_of(cfg.selection_bounds_px) == 1920 + 2 * 1'000'000);
+    CHECK(mag::height_of(cfg.selection_bounds_px) == 1080 + 2 * 1'000'000);
+
+    // Numbers beyond Px range narrow when decoded; the wrapped values have to
+    // come out of validate() bounded rather than absurd.
+    mag::AppConfig wrapped = mag::AppConfig::defaults();
+    CHECK(mag::from_json(R"({"selection_bounds_px":[3000000000,0,3000000000,100]})", wrapped));
+    CHECK(mag::validate(wrapped, desktop));
+    CHECK(mag::width_of(wrapped.selection_bounds_px) <= 1920 + 2 * 1'000'000);
+    CHECK(mag::height_of(wrapped.selection_bounds_px) <= 1080 + 2 * 1'000'000);
+
+    // The parsed graph is bounded in depth and in size: a hostile file fails
+    // the parse rather than the process.
+    mag::AppConfig sink = mag::AppConfig::defaults();
+    CHECK(!mag::from_json("{\"a\": " + std::string(100, '[') + std::string(100, ']') + "}", sink));
+    CHECK(mag::from_json("{\"a\": " + std::string(20, '[') + std::string(20, ']') + "}", sink));
+    std::string flood = "{\"a\":[";
+    for (int i = 0; i < 1'200'000; ++i) flood += "0,";
+    flood += "0]}";
+    CHECK(!mag::from_json(flood, sink));
+}
+
 }  // namespace
 
 int main() {
@@ -1035,6 +1118,8 @@ int main() {
     test_selection_drag();
     test_random_round_trips();
     test_magnification_controller();
+    test_display_adaptation();
+    test_hostile_config_input();
     test_viewport();
     test_ratio_lock();
     test_hotkey_text();

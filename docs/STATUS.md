@@ -1,6 +1,6 @@
 # Status
 
-_Last updated: 2026-09-19, after the ratio-and-chord-field revision._
+_Last updated: 2026-10-26, after the short-screen usability revision._
 
 ## Where the project stands
 
@@ -17,6 +17,7 @@ tests:      ./build.sh test
             python tests/verify_features.py
             python tests/verify_picker.py
             python tests/verify_runtime.py
+            python tests/verify_resolutions.py
             python tests/verify_visual.py
             python tests/measure_perf.py
             python tests/verify_stress.py
@@ -27,15 +28,226 @@ tests:      ./build.sh test
 
 | Suite | Result |
 |---|---|
-| `build.sh test` | **3476 / 3476** core checks pass (245 the viewport, 155 the ratio lock, 406 the hotkey text) |
-| `verify_features.py` | Chinese default, centred start, 10× cap, live slider, typed factor, restore defaults, survives off/on showing what it showed before, landscape + resizable + reflows when made taller, centre-the-window hotkey, size slider resizes in place, fit-to-source restores the whole region, **the ratio lock holds on a typed size and only while it is on**, editable presets, kept regions recalled intact, the language switch leaves nothing of the old one behind, clean exit |
-| `verify_picker.py` | move-by-drag, on-screen confirm button, double-click confirm, Enter confirm |
-| `verify_runtime.py` | **22 / 22** acceptance checks pass, including a chord another application owns, a chord the program itself owns being reassigned, **a second chord field clicked straight after another**, a bare key being refused with a word rather than in silence, and a mouse button being bound and fired |
-| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor; every shape survives the window being shrunk to 406×305 |
-| `measure_perf.py` | idle 37.3 MB / 0.00 % CPU; running **1.56 %** CPU; released to 2.7 MB when switched off |
-| `verify_stress.py` | 15 show/hide cycles, frames climbing at 56 fps; `WM_DISPLAYCHANGE` acknowledged |
-| `verify_package.py` | the shipped **.zip** unpacked into a folder named with Chinese characters and a space: starts, magnifies, quits 0, and every DLL it imports ships with Windows |
+| `build.sh test` | **3503 / 3503** core checks pass (16 the display adaptation, 11 the hostile-config bounds) |
+| `verify_resolutions.py` | **39 / 39**: real mode ladder 2560×1440 → 1920×1080 → 1366×768 with per-rung startup/centring/pixel/settings checks; **three rounds of live mode changes with the magnifier running**, all survived; the window shrinks into a desktop that shrank under it; the forged-`WM_DPICHANGED` refusal is documented and the twin `WM_DISPLAYCHANGE` path is proven end to end |
+| `verify_rotation.py` | **PASS at orientations 90 and 270**, pixel-exact at 2× (mean abs diff 0.00); `--sweep` drove the 90 change live and restored the panel afterwards. 180 is refused by this panel's driver and stays unverified |
+| `verify_features.py` | **PASS, sixteen sections** — now including **[15] a corrupt config says so and heals** and **[16] a short settings window scrolls to its buttons**; [11] also proves an oversized typed size clamps into the desktop; [9]'s resize check is resolution-portable (grows taller on a narrow desktop); the suite's first portrait run (1600×2560 @ 270°) was green |
+| `verify_picker.py` | move-by-drag, on-screen confirm button, double-click confirm, Enter confirm — the harness now measures the hint bar at the picker's DPI (it draws DPI-scaled since this revision) |
+| `verify_runtime.py` | **22 / 22** acceptance checks pass, as before |
+| `verify_visual.py` | all four shapes correct; rectangle pixel-exact at 4× (mean abs diff **0.00**); resizing the window keeps the configured factor; every shape survives the window being shrunk to 406×305 — judged on the shape's **interior** since 2026-10-26 (the masked rim shows whatever the desktop has behind the window, which is not the app's business) |
+| `measure_perf.py` | idle 43.9 MB / 0.00 % CPU; running **4.69 %** CPU (gate < 10 %); released to 3.1 MB when switched off |
+| `verify_stress.py` | 15 show/hide cycles, frames climbing; `WM_DISPLAYCHANGE` acknowledged |
+| `verify_package.py` | **not rerun this revision**: `dist/` still holds the released 1.0.3 artifacts and repackaging is left to the next release |
 | `tools/check_resources.py` | 7 icons, group icon 1, manifest 1; the shell reports the icon |
+
+## The resolution-adaptation revision (2026-10-25)
+
+Everything the harnesses had ever proven was proven on one 2560×1440 desktop. This revision adds a
+harness that switches the *real* display mode (2560×1440 → 1920×1080 → 1366×768 and back), runs the
+app at each rung, and — the part that paid for itself on its first run — changes the mode while the
+magnifier is running, three times over.
+
+### Two crashes on the live-change path, both fixed
+
+`tests/verify_resolutions.py`'s very first run crashed the app with an access violation on the first
+live mode change. Diagnosis — a minidump written by a new `MAG_CRASH_DUMP` hook in `main.cpp` and
+walked without a debugger, plus breadcrumb prints — found two independent faults in the same chain:
+
+1. **`on_topology_changed()` rebuilt the capture group while the render thread was still running.**
+   The render service holds raw `ICaptureBackend*` and calls `acquire()` on them every frame; the
+   old code destroyed and rebuilt the backends *first* and stopped the render thread *after* — its
+   comment claimed the opposite order. Stop + join now happens before `captures_->rebuild()`.
+2. **`~RenderService()` walked `cfg.captures` — raw pointers into a capture group a topology
+   rebuild may already have replaced.** `release_all()` calls `backend->release_all_textures()`,
+   which is correct on the render thread (the backends are alive there by construction) and a
+   dangling virtual call from the destructor, which runs on the UI thread after the rebuild. The
+   destructor now skips the backend retirement: a backend drops its own texture cache when it is
+   destroyed, so nothing leaks. (Found second: the first fix merely moved the crash two switches
+   later, into this destructor's heap corruption — the canary allocator in the console build is what
+   separated a dangling-vtable read from everything else.)
+
+Both were invisible before because nothing had ever changed a display mode for real —
+`verify_stress.py` forges `WM_DISPLAYCHANGE` with the magnifier off.
+
+### What the new harness checks
+
+Per rung (full checks at 1920-width and above, recorded-only below): a cold start reports the new
+desktop in its status line; the first-run region is centred on the new work area; the magnifier
+renders and stays inside the desktop; the settings window and every control fit the work area; a
+known pattern is magnified pixel-exactly (4× on the large rungs, 2× on 1366×768); clean exit. Then
+the live section: three rounds of 2560→1920→1366→2560 with the magnifier running — the process
+survives, the display-changed notice arrives, frames recover, the window stays inside the desktop,
+and a rung smaller than the shipped 1280×960 window leaves the window shrunk to fit. The user's
+config directory is moved aside for the run and the display mode is restored on every exit path;
+the desktop is disrupted while it runs.
+
+### The adaptations
+
+* **`shrink_into_virtual_bounds()`** (`MagnificationController`): a desktop that shrank underneath a
+  running window scales the window down to fit, both axes by the same factor so the aperture keeps
+  its shape; the factor is untouched. This is the live counterpart of `validate()`'s startup clamp —
+  `clamp_into()` used to pin the position and leave an oversized size.
+* **First-run default size** (`first_run_output_size()`, core): the shipped 1280×960 window is
+  scaled down to at most two thirds of the desktop on a first run (1280×960 on 2560×1440, 960×720 on
+  1920×1080, 682×512 on 1366×768). An existing config is never touched.
+* **Settings window width** (`layout_controls()`): at very high scaling the three-column natural
+  width outran the screen, and `WM_GETMINMAXINFO` forbade the only size that fits. The chord field —
+  the one element with room to give — now compresses before the layout overflows (the 1080p target
+  never triggers it; it is insurance for 200 % scaling).
+* **GDI+ button text** (`paint_button()`): the offscreen bitmap defaulted to 96 DPI, so point-sized
+  label text stopped growing with the monitor while the layout rectangles around it scaled. The
+  bitmap now matches the control's DPI. The picker's hint-bar and size-readout fonts are
+  DPI-scaled too.
+* **`WM_DPICHANGED`** now reaches the host pump: a scale-factor change without a mode change used to
+  leave the cached monitor DPI stale forever. The handler is identical to the `WM_DISPLAYCHANGE`
+  one. Windows refuses to let another process *synthesize* the message — verified in the harness:
+  the send fails silently while a forged `WM_DISPLAYCHANGE` to the same window goes through — so
+  the DPI-only branch is reasoned-verified, not harness-verified; real coverage needs a manual
+  scale change.
+* **GDI fallback recovery** re-derives the monitor rect from the current display enumeration instead
+  of the build-time one, so a recovery after a missed mode change reads the screen as it is now.
+  (The DXGI backend already self-corrected: its ordinal fallback re-queries the live
+  `DesktopCoordinates`.)
+* **`AppHost::start_render_thread()`** — one body for the startup path and the rebuild path, so the
+  two cannot drift again. A renderer that dies on its own (`DeviceRemoved`) now republishes
+  `TopologyChanged` instead of leaving a permanently blank magnifier, bounded to three restarts a
+  minute. `topology_.snapshot()` calls are guarded: an exception unwinding through the wndproc
+  would terminate the process on a mid-hotplug enumeration failure.
+
+### Coverage note
+
+The rotation path is unchanged and still unverified (see known gaps): every rung here runs at
+orientation 0. The DPI-only branch (`WM_DPICHANGED` without a mode change) has no automated
+coverage — see above. `dist/` still holds the released 1.0.3 artifacts; repackaging is deliberately
+left to the next release.
+
+Two measurement notes from this revision, both environment rather than product:
+
+* Running CPU measured **7.19 %** right after the full battery (the handover session recorded
+  4.7–5.9 %, earlier revisions ~1 %). Still inside the 10 % gate. The machine had just run seven
+  suites back to back; attribution remains open — `tests/profile_cpu.py` exists for exactly this.
+* One `verify_features.py` run failed 3 checks (screenshot-based) when executed immediately after
+  `verify_resolutions.py` inside a back-to-back battery; it passed in the same sequence afterwards
+  and three times standalone. Working theory: the desktop was still settling after the mode
+  restore. If a pixel-checking suite fails right after a display-mode harness, rerun it on a
+  settled desktop before believing it.
+
+## The hostile-config and rotation revision (2026-10-25, evening)
+
+Three of the six standing gaps closed in one pass, and the rotation table went from one
+incidental data point to three verified entries. The external monitor was off and the laptop's
+internal panel (1600×2560 @ 165 Hz, orientation 270) was the only display — exactly the
+configuration the rotation path needs, so the opportunity was taken.
+
+### The three closed gaps
+
+1. **`validate()` sanitises rect edges before any span arithmetic.** A hand-edited config could
+   name edges that each fit Px while their *span* overflowed it (INT32_MIN..INT32_MAX), making
+   every `width_of()` undefined before the desktop clamps ran. Edges are now pinned into a band
+   of one megapixel around the desktop (`sanitize_rect_edges()`), inside which every span is
+   representable; the desktop clamps then do what they always did.
+2. **`ConfigStore::last_error()` has a reader.** A config that could not be opened, read, or
+   parsed silently reverted every setting, which reads as "my settings vanished". The status
+   line now says why, in a slot of its own (`config_load_error_`, for the same reason
+   `render_error_` has one: the hotkey-conflict notice that startup raises later would bury a
+   plain notice — that exact burial was caught by verify_features [15], which drives the whole
+   path: corrupt file → status names it → the first save heals the file).
+3. **The JSON reader bounds the parsed graph, not just the file's bytes.** Depth was already
+   capped at 32 (half the old gap text was stale); a value counter now caps the graph at 2^20
+   values too, so a hostile 16 MB file of `0,` fails the parse instead of expanding in memory.
+   Unit-tested in both directions — 3503 core checks, +11.
+
+### Rotation: 0 / 90 / 270 verified; 180 refused by this hardware
+
+`tests/verify_rotation.py` measures the live orientation and runs one pixel-exact 2× check
+(verify_visual's methodology, parameterised), always naming the orientation its verdict ran
+under. `--sweep` additionally rotates the live display through the other orientations and
+checks each — the same class of real display change verify_resolutions.py makes — restoring
+the original mode on every exit path.
+
+On this panel: **90 PASS, driven live by the sweep** (no longer just the incidental campaign
+of the earlier note), and **270 PASS in the panel's native evening state** — both pixel-exact,
+mean abs diff 0.00. **180 is refused by the driver**: the panel enumerates no rotated modes at
+all, and a direct `DM_DISPLAYORIENTATION` request returns DISP_CHANGE_FAILED, so 180 waits for
+hardware that accepts it. Rotation 0 stays covered by every pixel harness, as always.
+
+### And a first: verify_features ran whole on a portrait screen
+
+All fifteen sections green at 1600×2560, orientation 270 — the settings window came up 1591
+wide on a 1600 work area with every control inside the client. Two harness hardenings came out
+of it: [9]'s resize check assumed room to grow that a 1600-wide desktop does not have, so it
+now grows taller when width is exhausted (the same reflow is exercised), and [15] is the
+corrupt-config check above.
+
+## The short-screen usability revision (2026-10-26)
+
+The three known-unfixed items that genuinely affected use in specific scenarios, closed in one
+pass. Each is verified by a harness that runs the app.
+
+### The settings window scrolls when the screen is short
+
+A work area shorter than the natural layout (a short laptop panel at high scaling) used to
+strand the footer's Start/Save/Quit below the fold, and `WM_GETMINMAXINFO` forbade the only
+height that fit — the window was unusable, not just cramped. The window now scrolls as one
+unit: header, cards and footer all shift together (the header carries the offset; every other
+rectangle derives from it), so nothing scrolls under a fixed band and no child ever overlaps
+another. The minimum track height became a floor (header + footer + a row of cards) instead of
+the natural height, `WM_VSCROLL`/`WM_MOUSEWHEEL` are handled, and the scrollbar only exists
+while the content overflows.
+
+Two faults surfaced while wiring it, both instructive:
+
+* **The initial window size was an accident all along.** The first layout sized the frame to
+  `content_height`, which stops at the cards — footer not included — and only landed on the
+  right height because `WM_GETMINMAXINFO` clamped the request *up* to the natural minimum.
+  Lowering the minimum (which scrolling makes safe) removed the accidental clamp and the
+  window opened too short, footer below the fold — caught immediately by verify_features [9]
+  and [14], and by an interactive probe against a freshly built HEAD binary that pinned the
+  old behaviour as load-bearing accident. The initial sizing now names `natural_h`
+  explicitly.
+* **The harness's checkbox clicks were unreliable.** [11]'s keep-aspect checkbox sometimes
+  ignored a synthesized `WM_LBUTTONDOWN`/`UP` pair, which read as the lock (or its release)
+  doing nothing; three sequential checkbox interactions in the extended [11] turned the flake
+  into a visible failure. All keep-box clicks now use `BM_CLICK`, the same reliable mechanism
+  the harness already used for push buttons, and the unlock sub-case prints its result.
+
+verify_features [16] drives the whole feature end to end: shrink the settings window to its
+floor → the scrollbar appears with the right range → `WM_VSCROLL` to the bottom → the start
+button is inside the client → clicking it really turns the magnifier on → the window is
+restored.
+
+### The feel constants scale with the monitor now
+
+Four physical-pixel constants were 100 % values that shrank relative to everything else as the
+scale factor grew: the edge-dwell grab band (scaled where it is pushed to the input thread,
+capped at the minimum window edge), the Ctrl+Alt+arrow resize step (40 px at 100 %), the
+magnifier's border (2 px) and the first-run corner radius (16 px). The picker's 5-px handle
+band remains unscaled — it lives in the DPI-less core hit tester, and plumbing DPI into it
+was not worth the layering breach for a cosmetic margin.
+
+### An oversized typed size clamps instead of vanishing
+
+Typing 99999 into the width box used to be silently ignored: the UI clamped only the minimum,
+the controller rejected the maximum, and Apply did nothing at all. `commit_size_edits()` now
+clamps both axes to the desktop — the same contract the typed factor already had — and [11]
+verifies it: the expected result is the ratio-preserving size that fits the desktop, either
+axis allowed to be the binding one (2560×1440 bound the height first: 900×600 → 2160×1440).
+
+### Verification
+
+`verify_features.py` grew to sixteen sections and passes whole: [9] resize-reflow, [11]
+ratio lock + oversized clamp, [14] language switch, [16] the scroll feature; the rest
+unchanged. The other suites ran green after the change (runtime 22/22, picker, visual, stress,
+perf) — see the green table above for this revision's row updates. Core unit count is
+unchanged at 3503: everything in this revision is UI- or platform-layer.
+
+One harness hardening came out of the battery: verify_visual's shrunk-shape check mixed the
+masked rim into its whole-window average, and the rim is transparent — it shows whatever the
+desktop has behind the window, which changed when the external monitor's return rearranged
+the icons. Circle failed at 60.4 against a 60 threshold while its centre, corners and scale
+were all correct; the metric now samples the interior only (central 60 %, opaque under any
+inscribed shape), which is both immune to the desktop's housekeeping and a tighter bound on
+the region that matters. Corner-mask and centre assertions are unchanged.
 
 ## The ratio-and-chord-field revision (2026-09-19)
 
@@ -581,15 +793,17 @@ times a second for nothing.
 
 ## Known remaining gaps
 
-1. **`validate()` does not clamp an out-of-range selection** — a span wider than `INT32_MAX` in a
-   hand-edited config overflows `width_of()`.
-2. **`ConfigStore::last_error()` has no reader**, so a corrupt config silently reverts to defaults.
-3. The JSON reader bounds the file's *bytes* (16 MB) rather than the parsed object graph.
-4. Cross-monitor selection is implemented but has never run against real multi-monitor hardware.
-5. Only rotations 0 and 90 are verified; 180 and 270 come from the same table but are untested.
-6. The executable is unsigned. The design document calls for Authenticode signing; no certificate
+1. Cross-monitor selection is implemented but has never run against real multi-monitor hardware.
+2. The executable is unsigned. The design document calls for Authenticode signing; no certificate
    was available, and the embedder recomputes no checksum, so signing would have to happen after
    packaging.
+3. Rotation 180 is the one unverified orientation entry: 90 and 270 are pixel-exact as of
+   2026-10-25 (`verify_rotation.py`), but this panel's driver refuses a 180° mode change
+   (`DISP_CHANGE_FAILED`), so it waits for hardware that accepts one.
+
+(The out-of-range-selection overflow in `validate()`, the unread `ConfigStore::last_error()`,
+and the JSON reader's parsed-graph bound were closed on 2026-10-25 evening — see the revision
+section above.)
 
 ## Verification method caveat
 

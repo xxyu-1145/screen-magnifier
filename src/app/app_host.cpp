@@ -203,6 +203,15 @@ LRESULT CALLBACK AppHost::pump_wnd_proc(HWND hwnd, UINT message, WPARAM wparam, 
             g_host->bus_.publish(make_event(TopologyChanged{0}));
             return 0;
         }
+        if (message == WM_DPICHANGED) {
+            // A scale-factor change fires this without a mode change, and
+            // nothing else refreshes the cached monitor DPI. lParam carries a
+            // suggested rectangle for the receiving window, which a
+            // never-shown pump window has no use for.
+            g_host->notice_ = Notice{Str::DisplayChanged};
+            g_host->bus_.publish(make_event(TopologyChanged{0}));
+            return 0;
+        }
     }
     if (message == WM_NCCREATE) return TRUE;
     return ::DefWindowProcW(hwnd, message, wparam, lparam);
@@ -215,7 +224,14 @@ bool AppHost::initialize() {
 
     enable_per_monitor_dpi_v2();
 
-    topo_ = topology_.snapshot();
+    try {
+        topo_ = topology_.snapshot();
+    } catch (const std::exception& ex) {
+        // Enumeration can fail while a monitor is mid-hotplug. Dying here would
+        // leave only a crash dialog; refusing to start with a reason is kinder.
+        last_error_ = std::string("could not enumerate the display topology: ") + ex.what();
+        return false;
+    }
     if (is_empty(topo_.virtual_desktop_px)) {
         last_error_ = "could not determine the virtual desktop extent";
         return false;
@@ -247,6 +263,13 @@ bool AppHost::initialize() {
         config_.selection_bounds_px =
             centre_on_primary(width_of(config_.selection_bounds_px),
                               height_of(config_.selection_bounds_px));
+        // The shipped 16 px corner radius is a 100 % constant; scale it with
+        // the primary monitor so the roundness keeps its proportion (validate()
+        // still clamps it to the shape's own extent).
+        if (const MonitorInfoPx* mon = topo_.primary()) {
+            config_.selection_corner_radius_px =
+                ::MulDiv(config_.selection_corner_radius_px, static_cast<int>(mon->dpi), 96);
+        }
         // Every slot starts as the shipped region rather than empty, so
         // recalling one always goes somewhere and the row reads as a set of
         // choices rather than as four dead buttons.
@@ -255,6 +278,14 @@ bool AppHost::initialize() {
                                    config_.selection_corner_radius_px};
         }
         config_.selection_slot = 0;
+        // The shipped 1280x960 output window is more than a small laptop can
+        // show at once; scale a first-run default down to the desktop (see the
+        // core helper). A config that exists is never touched, and validate()
+        // still clamps the result into the desktop.
+        config_.output_size_px =
+            first_run_output_size(config_.output_size_px,
+                                  SizePx{width_of(topo_.virtual_desktop_px),
+                                         height_of(topo_.virtual_desktop_px)});
     }
 
     selection_ = std::make_unique<SelectionController>(bus_, topo_.virtual_desktop_px);
@@ -382,30 +413,7 @@ bool AppHost::initialize() {
     reregister_hotkeys();
 
     // --- render thread ---
-    RenderService::Config render_cfg;
-    render_cfg.hwnd = overlay_.hwnd();
-    render_cfg.virtual_desktop_px = topo_.virtual_desktop_px;
-    render_cfg.captures = captures_->raw();
-    render_cfg.target_fps = config_.target_fps;
-    render_cfg.filter = config_.scale_filter;
-    render_cfg.show_border = config_.show_border;
-    render_cfg.exclude_from_capture = config_.exclude_self_from_capture;
-    render_ = std::make_unique<RenderService>(render_cfg, mailbox_);
-
-    render_thread_ = std::jthread([this](std::stop_token token) {
-        try {
-            render_->run(token);
-        } catch (const std::exception& ex) {
-            // A render failure must not take the process down: the window stays
-            // blank and the settings window explains why. Reported through the
-            // bus because this runs on the render thread and the message is
-            // consumed by the UI thread.
-            ErrorReported report{};
-            report.code = 2;
-            report.text = std::string("renderer unavailable: ") + ex.what();
-            bus_.publish(make_event(std::move(report)));
-        }
-    });
+    start_render_thread();
 
     // --- settings window ---
     ControlWindow::Callbacks ui;
@@ -542,13 +550,37 @@ bool AppHost::initialize() {
     return true;
 }
 
+int AppHost::scaled_dwell_band() const {
+    // The band is a feel constant in the config (8 px at 100 % scaling); scale
+    // it with the monitor so the grab strip stays the same fraction of the
+    // screen, and cap it at the minimum window edge so an extreme stored value
+    // cannot swallow a whole window.
+    UINT dpi = 96;
+    if (overlay_.hwnd()) {
+        dpi = ::GetDpiForWindow(overlay_.hwnd());
+    } else if (const MonitorInfoPx* mon = topo_.primary()) {
+        dpi = mon->dpi;
+    }
+    return std::min<Px>(kMinOutputEdgePx,
+                        static_cast<Px>(::MulDiv(config_.edge_dwell_band_px,
+                                                 static_cast<int>(dpi), 96)));
+}
+
 void AppHost::load_config_or_defaults() {
     config_ = AppConfig::defaults();
     std::ifstream probe(ConfigStore::default_path());
     fresh_config_ = !probe.good();
     AppConfig loaded = config_;
-    store_.load_now(ConfigStore::default_path(), loaded, config_);
+    const bool loaded_ok = store_.load_now(ConfigStore::default_path(), loaded, config_);
     config_ = loaded;
+    if (!loaded_ok) {
+        // The store says why it fell back -- unopenable, unreadable, or not
+        // JSON at all. Without this the user only sees every setting return to
+        // its default, which reads as settings being lost for no reason. It
+        // lives in its own status slot (not notice_) because the hotkey
+        // notice arrives later in startup and would overwrite a plain notice.
+        config_load_error_ = store_.last_error();
+    }
     if (!validate(config_, topo_.virtual_desktop_px)) {
         config_ = AppConfig::defaults();
         validate(config_, topo_.virtual_desktop_px);
@@ -732,6 +764,11 @@ void AppHost::handle_event(const AppEvent& event) {
 }
 
 void AppHost::handle_hotkey(HotkeyAction action) {
+    // The keyboard resize step is a feel constant: 40 px at 100 % scaling,
+    // scaled with the monitor so it stays the same fraction of the screen.
+    const Px resize_step = static_cast<Px>(
+        ::MulDiv(kWindowResizeStepPx,
+                 static_cast<int>(overlay_.hwnd() ? ::GetDpiForWindow(overlay_.hwnd()) : 96), 96));
     switch (action) {
         case HotkeyAction::ToggleMagnifier:
             toggle_magnifier();
@@ -769,16 +806,16 @@ void AppHost::handle_hotkey(HotkeyAction action) {
             break;
         }
         case HotkeyAction::GrowWidth:
-            magnifier_->step_output_size(kWindowResizeStepPx, 0);
+            magnifier_->step_output_size(resize_step, 0);
             break;
         case HotkeyAction::ShrinkWidth:
-            magnifier_->step_output_size(-kWindowResizeStepPx, 0);
+            magnifier_->step_output_size(-resize_step, 0);
             break;
         case HotkeyAction::GrowHeight:
-            magnifier_->step_output_size(0, kWindowResizeStepPx);
+            magnifier_->step_output_size(0, resize_step);
             break;
         case HotkeyAction::ShrinkHeight:
-            magnifier_->step_output_size(0, -kWindowResizeStepPx);
+            magnifier_->step_output_size(0, -resize_step);
             break;
         case HotkeyAction::ResetSelection:
             reset_selection();
@@ -830,7 +867,7 @@ void AppHost::toggle_magnifier() {
         const bool live = fsm_->state() != InteractionState::Off;
         input_->set_edge_zone(live ? std::optional<RectPx>(overlay_.window_rect_px())
                                    : std::nullopt,
-                              config_.edge_dwell_band_px, live && config_.edge_dwell_enabled);
+                              scaled_dwell_band(), live && config_.edge_dwell_enabled);
     }
     publish_snapshot();
     refresh_status();
@@ -845,7 +882,7 @@ void AppHost::set_pass_through(bool enable) {
     }
     fsm_->request_pass_through(enable);
     if (input_) {
-        input_->set_edge_zone(overlay_.window_rect_px(), config_.edge_dwell_band_px,
+        input_->set_edge_zone(overlay_.window_rect_px(), scaled_dwell_band(),
                               config_.edge_dwell_enabled && enable);
     }
     publish_snapshot();
@@ -1105,26 +1142,53 @@ void AppHost::open_picker() {
 
 void AppHost::on_topology_changed() {
     topology_.invalidate();
-    topo_ = topology_.snapshot();
+    try {
+        topo_ = topology_.snapshot();
+    } catch (const std::exception& ex) {
+        // Enumeration throws while a monitor is mid-hotplug. Letting that
+        // unwind through the wndproc would terminate the process; keep the
+        // previous snapshot and say why nothing changed instead.
+        ErrorReported report{};
+        report.code = 1;
+        report.text = std::string("topology query failed: ") + ex.what();
+        bus_.publish(make_event(std::move(report)));
+        refresh_status();
+        ui_dirty_ = true;
+        return;
+    }
     if (is_empty(topo_.virtual_desktop_px)) return;
 
     if (selection_) selection_->set_virtual_bounds(topo_.virtual_desktop_px);
-    if (magnifier_) magnifier_->set_virtual_bounds(topo_.virtual_desktop_px);
+    if (magnifier_) {
+        magnifier_->set_virtual_bounds(topo_.virtual_desktop_px);
+        // A smaller desktop cannot hold a window sized for the old one; scale
+        // it down, both axes by the same factor so the aperture keeps its
+        // shape, rather than leaving a rect larger than the screen.
+        magnifier_->shrink_into_virtual_bounds();
+    }
     picker_.set_virtual_desktop(topo_.virtual_desktop_px);
 
-    // Rebuild capture for the new monitor set. The render service holds raw
-    // backend pointers, so it is rebuilt after the capture group is replaced;
-    // the domain configuration survives untouched, as the design requires.
+    // The render service holds raw backend pointers, so it is stopped and
+    // joined *before* the capture group it reads from is destroyed and
+    // rebuilt. Replacing the backends first left the render loop calling
+    // acquire() on freed backends -- an access violation on every live
+    // display-mode change with the magnifier on.
+    if (render_) render_->request_stop();
+    if (render_thread_.joinable()) render_thread_.join();
+
     const bool was_running = captures_ && captures_->running();
     if (captures_) captures_->rebuild(topo_.monitors);
     if (was_running && captures_) captures_->start();
 
-    if (render_) {
-        const int fps = config_.target_fps;
-        render_->request_stop();
-    }
-    if (render_thread_.joinable()) render_thread_.join();
+    start_render_thread();
 
+    apply_geometry_to_window();
+    publish_snapshot();
+    refresh_status();
+    ui_dirty_ = true;
+}
+
+void AppHost::start_render_thread() {
     RenderService::Config cfg;
     cfg.hwnd = overlay_.hwnd();
     cfg.virtual_desktop_px = topo_.virtual_desktop_px;
@@ -1135,20 +1199,44 @@ void AppHost::on_topology_changed() {
     cfg.exclude_from_capture = config_.exclude_self_from_capture;
     render_ = std::make_unique<RenderService>(cfg, mailbox_);
     render_thread_ = std::jthread([this](std::stop_token token) {
+        RenderExitReason reason = RenderExitReason::StopRequested;
         try {
-            render_->run(token);
+            reason = render_->run(token);
         } catch (const std::exception& ex) {
+            // A render failure must not take the process down: the window stays
+            // blank and the settings window explains why. Reported through the
+            // bus because this runs on the render thread and the message is
+            // consumed by the UI thread.
             ErrorReported report{};
             report.code = 2;
             report.text = std::string("renderer unavailable: ") + ex.what();
             bus_.publish(make_event(std::move(report)));
+            return;
         }
+        handle_renderer_exit(reason);
     });
+}
 
-    apply_geometry_to_window();
-    publish_snapshot();
-    refresh_status();
-    ui_dirty_ = true;
+void AppHost::handle_renderer_exit(RenderExitReason reason) {
+    if (reason != RenderExitReason::DeviceRemoved) return;
+    // The renderer is gone and nothing else rebuilds it, which used to leave a
+    // permanently blank magnifier. Publish the same topology change a display
+    // swap delivers -- fresh capture group, fresh render thread -- but bound:
+    // a device-removed storm gets three rebuilds a minute, then stays down
+    // until something the user does changes the situation.
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(renderer_restarts_, [now](auto t) {
+        return now - t > std::chrono::minutes(1);
+    });
+    if (renderer_restarts_.size() >= 3) {
+        ErrorReported report{};
+        report.code = 2;
+        report.text = "renderer keeps dying (device removed); not restarting again";
+        bus_.publish(make_event(std::move(report)));
+        return;
+    }
+    renderer_restarts_.push_back(now);
+    bus_.publish(make_event(TopologyChanged{0}));
 }
 
 void AppHost::handle_capture_lost(std::uint32_t output_id) {
@@ -1190,7 +1278,7 @@ void AppHost::apply_geometry_to_window() {
     overlay_.apply_geometry(magnifier_->output_rect());
     config_.output_position_px = magnifier_->output_position();
     if (input_) {
-        input_->set_edge_zone(overlay_.window_rect_px(), config_.edge_dwell_band_px,
+        input_->set_edge_zone(overlay_.window_rect_px(), scaled_dwell_band(),
                               config_.edge_dwell_enabled);
     }
 }
@@ -1202,6 +1290,11 @@ void AppHost::refresh_status() {
     // exactly those notices and nothing else.
     status_text_.clear();
     if (!render_error_.empty()) status_text_ = render_error_;
+    if (!config_load_error_.empty()) {
+        if (!status_text_.empty()) status_text_ += "   ";
+        status_text_ += tr_utf8(Str::ConfigUnreadable);
+        status_text_ += config_load_error_;
+    }
     if (!notice_.empty()) {
         if (!status_text_.empty()) status_text_ += "   ";
         // Composed here rather than when the event arrived, so the line is in

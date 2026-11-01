@@ -442,6 +442,12 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind, bool checked, bool
     GetWindowTextW(dis->hwndItem, label, 192);
 
     Bitmap buffer(width, height, PixelFormat32bppPARGB);
+    // A plain bitmap defaults to 96 DPI and the Graphics inherits that, so the
+    // point-sized fonts drawn into it kept their 100 % size while the layout
+    // rectangles around them grew with the monitor. Match the control's DPI or
+    // the label shrinks inside the button at 125 % and above.
+    const UINT dpi = dpi_for(dis->hwndItem);
+    buffer.SetResolution(static_cast<REAL>(dpi), static_cast<REAL>(dpi));
     {
         Graphics g(&buffer);
         g.SetSmoothingMode(SmoothingModeAntiAlias);
@@ -744,6 +750,10 @@ struct ControlWindow::Impl {
     // control out of reach.
     int min_track_w{0};
     int min_track_h{0};
+    // Vertical scroll position of the whole layout, header included. Nonzero
+    // only while the client is shorter than the content -- see
+    // layout_controls(), which owns the arithmetic.
+    int scroll_y{0};
     // True while the factor box owns the keyboard. The window syncs several
     // times a second, which would otherwise overwrite the number as it is typed.
     bool factor_editing{false};
@@ -1024,12 +1034,20 @@ void ControlWindow::apply_font() {
 void ControlWindow::layout_controls(int client_w, int client_h, bool resize_window) {
     auto& s = *impl_;
     const UINT dpi = dpi_for(hwnd_);
+    // Several callers pass 0 for a dimension they do not know; the live client
+    // rect is the truth, and the scroll math below is wrong without it.
+    {
+        RECT live{};
+        GetClientRect(hwnd_, &live);
+        if (client_w <= 0) client_w = static_cast<int>(live.right);
+        if (client_h <= 0) client_h = static_cast<int>(live.bottom);
+    }
     const int pad = scaled(22, dpi);
     const int card_pad = scaled(14, dpi);
     const int row = scaled(29, dpi);
     const int gap = scaled(10, dpi);
     const int title_h = scaled(20, dpi);
-    const int chord_w = scaled(140, dpi);
+    int chord_w = scaled(140, dpi);
     const int seg_h = scaled(34, dpi);
     const int preset_h = scaled(32, dpi);
     const int slider_h = scaled(28, dpi);
@@ -1067,12 +1085,38 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
     // No card's height depends on the column it lands in, because every card
     // reflows inside whatever width it is given. That is what lets the whole
     // arrangement be solved from a list of heights before anything is placed.
-    const int hk_row_w = label_w + gap + chord_w;
+    // Equal columns, three of them. Equal is what makes the window read as one
+    // grid rather than three strips; three keeps the cards short without making
+    // any single column so wide that the middle of the window is empty.
+    constexpr int kColumns = 3;
+
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int work_w = static_cast<int>(work.right - work.left);
+    const int work_h = static_cast<int>(work.bottom - work.top);
+
+    int hk_row_w = label_w + gap + chord_w;
     // Below this a card's own contents start to collide, so it is the floor for
     // a column. Every card but the chords reflows inside far less than this --
     // the output fields are the widest of them at about 290 -- so it is a chord
     // row that sets the width, and the whole window is only as wide as three of
     // those plus the gaps.
+    //
+    // The work area caps what a frame can be, though: at 200 % scaling the
+    // natural width runs past even a 1920-wide screen, and WM_GETMINMAXINFO
+    // would then forbid the only size that fits. The chord field is the one
+    // element with room to give, so squeeze it first and keep three usable
+    // columns; below that the overflow is accepted rather than reflowed.
+    const int max_frame_w = work_w - scaled(20, dpi);
+    const int frame_fixed = 2 * pad + (kColumns - 1) * col_gap;
+    if (frame_fixed + kColumns * (std::max(scaled(285, dpi), hk_row_w) + 2 * card_pad)
+        > max_frame_w) {
+        const int col_budget = std::max(scaled(285, dpi),
+                                        (max_frame_w - frame_fixed) / kColumns
+                                            - 2 * card_pad);
+        chord_w = std::max(scaled(70, dpi), chord_w - (hk_row_w - col_budget));
+        hk_row_w = label_w + gap + chord_w;
+    }
     const int col_min = std::max(scaled(285, dpi), hk_row_w) + 2 * card_pad;
 
     // Nine and seven: the display and zoom actions first, which keeps the four
@@ -1095,15 +1139,6 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
     enum CardIndex { kHk1, kHk2, kZoom, kOutput, kAct, kRnd, kShape, kCardCount };
     const int heights[kCardCount] = {h_hk1, h_hk2, h_zoom, h_output, h_act, h_rnd, h_shape};
 
-    RECT work{};
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    const int work_w = static_cast<int>(work.right - work.left);
-    const int work_h = static_cast<int>(work.bottom - work.top);
-
-    // Equal columns, three of them. Equal is what makes the window read as one
-    // grid rather than three strips; three keeps the cards short without making
-    // any single column so wide that the middle of the window is empty.
-    constexpr int kColumns = 3;
     const int natural = kColumns * col_min + (kColumns - 1) * col_gap + 2 * pad;
     const int width = client_w > 0 ? std::max(client_w, natural) : natural;
     const int col_w = (width - 2 * pad - (kColumns - 1) * col_gap) / kColumns;
@@ -1150,6 +1185,20 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
         if (slack > 0) body_gap += std::min(scaled(18, dpi), slack / most_gaps);
     }
 
+    // A work area shorter than the natural layout used to strand the footer's
+    // buttons below the fold, with WM_GETMINMAXINFO forbidding the only height
+    // that fit. The window now scrolls as one unit -- header, cards and footer
+    // all shift together, so nothing scrolls under a fixed band and no child
+    // ever overlaps another. The header carries the offset; everything below
+    // derives its position from it.
+    const bool scrollable = !resize_window && client_h > 0 && natural_h > client_h;
+    if (scrollable) {
+        s.scroll_y = std::clamp(s.scroll_y, 0, natural_h - client_h);
+    } else {
+        s.scroll_y = 0;
+    }
+    const int dy = -s.scroll_y;
+
     auto place = [&](HWND h, int x, int top, int w, int hgt) {
         if (h) MoveWindow(h, x, top, std::max(1, w), std::max(1, hgt), TRUE);
     };
@@ -1158,7 +1207,7 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
     s.content_height = 0;
 
     // --- header, spanning every column ---
-    s.header = RECT{0, 0, width, header_h};
+    s.header = RECT{0, dy, width, header_h + dy};
     {
         const int toggle_w = scaled(72, dpi);
         const int toggle_h = scaled(32, dpi);
@@ -1353,9 +1402,13 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
     }
 
     // The window is resizable, so record the smallest frame this arrangement
-    // still fits into; WM_GETMINMAXINFO enforces it, because below this the
-    // cards in a column would start to overlap.
-    RECT minimum{0, 0, natural, natural_h};
+    // still fits in; WM_GETMINMAXINFO enforces it, because below this the
+    // cards in a column would start to overlap. Height is the exception: the
+    // window scrolls, so it may shrink below the natural height down to a
+    // floor that keeps the header, the footer and a row of cards visible.
+    const int min_client_h =
+        std::min(natural_h, std::max(scaled(360, dpi), header_h + footer_h + scaled(80, dpi)));
+    RECT minimum{0, 0, natural, min_client_h};
     AdjustWindowRectEx(&minimum, static_cast<DWORD>(GetWindowLongW(hwnd_, GWL_STYLE)), FALSE,
                        static_cast<DWORD>(GetWindowLongW(hwnd_, GWL_EXSTYLE)));
     s.min_track_w = minimum.right - minimum.left;
@@ -1365,8 +1418,13 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
         sized_once_ = true;
         const int max_h = std::max(scaled(400, dpi), work_h - scaled(40, dpi));
 
+        // The full natural height, footer included. content_height stops at
+        // the cards; the old code sized to that and only landed on the right
+        // height because WM_GETMINMAXINFO clamped the request back up to the
+        // natural minimum -- a clamp this window no longer has, now that a
+        // short height is legal and scrolls.
         RECT frame{0, 0, std::min(width, work_w - scaled(20, dpi)),
-                   std::min(s.content_height, max_h)};
+                   std::min(natural_h, max_h)};
         AdjustWindowRectEx(&frame, static_cast<DWORD>(GetWindowLongW(hwnd_, GWL_STYLE)), FALSE,
                            static_cast<DWORD>(GetWindowLongW(hwnd_, GWL_EXSTYLE)));
         const int w = frame.right - frame.left;
@@ -1376,6 +1434,20 @@ void ControlWindow::layout_controls(int client_w, int client_h, bool resize_wind
         SetWindowPos(hwnd_, nullptr, std::max(static_cast<int>(work.left), x),
                      std::max(static_cast<int>(work.top), y), w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
+    // The scrollbar mirrors the scroll math above. Hidden whenever the content
+    // fits, so ordinary screens never see it.
+    if (!resize_window && client_h > 0) {
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        si.nMin = 0;
+        si.nMax = natural_h;
+        si.nPage = static_cast<UINT>(std::max(1, client_h));
+        si.nPos = s.scroll_y;
+        SetScrollInfo(hwnd_, SB_VERT, &si, FALSE);
+        ShowScrollBar(hwnd_, SB_VERT, natural_h > client_h);
     }
 }
 
@@ -1417,9 +1489,17 @@ LRESULT CALLBACK ControlWindow::wnd_proc(HWND hwnd, UINT message, WPARAM wparam,
                 g.FillRectangle(&page, 0, 0, w, h);
 
                 SolidBrush header_brush(Gdiplus::Color(255, 0xFF, 0xFF, 0xFF));
-                g.FillRectangle(&header_brush, 0, 0, w, s.header.bottom);
-                SolidBrush rule(th.separator);
-                g.FillRectangle(&rule, 0, s.header.bottom - 1, w, 1);
+                // Scrolled, the header's top can sit above the client; clamp
+                // the band to what is actually visible.
+                const int header_top = std::max<LONG>(0, s.header.top);
+                const int header_bottom =
+                    std::min<LONG>(static_cast<LONG>(h), s.header.bottom);
+                if (header_bottom > header_top) {
+                    g.FillRectangle(&header_brush, 0, header_top, w,
+                                    header_bottom - header_top);
+                    SolidBrush rule(th.separator);
+                    g.FillRectangle(&rule, 0, header_bottom - 1, w, 1);
+                }
 
                 for (int i = 0; i < s.card_count; ++i) {
                     const RECT& c = s.cards[i];
@@ -1543,6 +1623,55 @@ LRESULT CALLBACK ControlWindow::wnd_proc(HWND hwnd, UINT message, WPARAM wparam,
             }
             break;
 
+        case WM_VSCROLL: {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int line = scaled(29, dpi_for(hwnd));
+            const int page = std::max(line, static_cast<int>(rc.bottom) - 1);
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_ALL;
+            GetScrollInfo(hwnd, SB_VERT, &si);
+            int target = s.scroll_y;
+            switch (LOWORD(wparam)) {
+                case SB_LINEUP: target -= line; break;
+                case SB_LINEDOWN: target += line; break;
+                case SB_PAGEUP: target -= page; break;
+                case SB_PAGEDOWN: target += page; break;
+                case SB_TOP: target = 0; break;
+                case SB_BOTTOM: target = static_cast<int>(si.nMax); break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: target = static_cast<int>(si.nTrackPos); break;
+                default: break;
+            }
+            if (target == s.scroll_y) return 0;
+            s.scroll_y = std::max(0, target);
+            layout_controls(static_cast<int>(rc.right), static_cast<int>(rc.bottom), false);
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+        }
+
+        case WM_MOUSEWHEEL: {
+            // The wheel reaches the focused window; scroll only when there is
+            // somewhere to go, and pass it through otherwise.
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+            GetScrollInfo(hwnd, SB_VERT, &si);
+            const int scroll_max =
+                std::max(0, static_cast<int>(si.nMax) - static_cast<int>(si.nPage));
+            const bool anywhere = s.scroll_y > 0 || s.scroll_y < scroll_max;
+            if (!anywhere) break;
+            const int ticks = static_cast<short>(HIWORD(wparam)) / WHEEL_DELTA;
+            const int step = scaled(29, dpi_for(hwnd)) * 3;
+            s.scroll_y = std::clamp(s.scroll_y - ticks * step, 0, scroll_max);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            layout_controls(static_cast<int>(rc.right), static_cast<int>(rc.bottom), false);
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+        }
+
         case WM_SIZE:
             if (wparam != SIZE_MINIMIZED) {
                 layout_controls(LOWORD(lparam), HIWORD(lparam), false);
@@ -1595,11 +1724,16 @@ int ControlWindow::read_dwell_ms() const {
 
 void ControlWindow::commit_size_edits() {
     auto& s = *impl_;
+    // Oversized values clamp to the desktop, the same contract the typed
+    // factor has: a value the controller would reject used to leave Apply
+    // silently doing nothing at all.
+    const Px max_w = std::max<Px>(kMinOutputEdgePx, s.desktop.width);
+    const Px max_h = std::max<Px>(kMinOutputEdgePx, s.desktop.height);
     wchar_t buf[32] = {};
     GetWindowTextW(s.out_w, buf, 32);
-    const Px w = std::max<Px>(kMinOutputEdgePx, static_cast<Px>(_wtoi(buf)));
+    const Px w = std::clamp<Px>(static_cast<Px>(_wtoi(buf)), kMinOutputEdgePx, max_w);
     GetWindowTextW(s.out_h, buf, 32);
-    const Px h = std::max<Px>(kMinOutputEdgePx, static_cast<Px>(_wtoi(buf)));
+    const Px h = std::clamp<Px>(static_cast<Px>(_wtoi(buf)), kMinOutputEdgePx, max_h);
     set_text_int(s.out_w, w);
     set_text_int(s.out_h, h);
     if (callbacks_.on_output_size_changed) callbacks_.on_output_size_changed(SizePx{w, h});

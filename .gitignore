@@ -6,3 +6,7 @@ dist/
 
 # Per-machine Claude Code settings, not part of the project.
 .claude/
+
+# Session tooling scratch and Python bytecode caches.
+.zcode/
+__pycache__/

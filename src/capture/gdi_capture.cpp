@@ -324,6 +324,29 @@ Resources build_resources(RectPx requested_rect_px) {
     return res;
 }
 
+// Re-derives a monitor rect the way the topology service numbered it
+// (enumeration order + 1), so a recovery after a missed WM_DISPLAYCHANGE
+// captures the screen as it is now rather than as it was at build time.
+// Returns an empty rect when the ordinal no longer exists.
+RectPx current_monitor_rect_px(std::uint32_t output_id) noexcept {
+    struct Ctx {
+        std::uint32_t wanted;
+        std::uint32_t seen;
+        RectPx rect;
+    } ctx{output_id, 0, RectPx{}};
+    EnumDisplayMonitors(nullptr, nullptr,
+                        [](HMONITOR, HDC, LPRECT r, LPARAM lp) -> BOOL {
+                            auto* c = reinterpret_cast<Ctx*>(lp);
+                            if (c->seen++ == c->wanted) {
+                                c->rect = RectPx{r->left, r->top, r->right, r->bottom};
+                                return FALSE;  // found it; stop enumerating
+                            }
+                            return TRUE;
+                        },
+                        reinterpret_cast<LPARAM>(&ctx));
+    return ctx.rect;
+}
+
 class GdiCaptureBackend final : public ICaptureBackend {
 public:
     explicit GdiCaptureBackend(BoundedEventBus& bus) noexcept : bus_(bus) {}
@@ -627,6 +650,12 @@ private:
 
     void attempt_recovery() noexcept {
         try {
+            // The stored rect describes the build-time monitor; re-derive it so
+            // a recovery after a display change reads the screen as it is now.
+            const RectPx current = current_monitor_rect_px(output_id_);
+            if (!is_empty(current)) {
+                requested_rect_px_ = current;
+            }
             Resources built = build_resources(requested_rect_px_);
             install(built);
             set_fault(false, std::string{});

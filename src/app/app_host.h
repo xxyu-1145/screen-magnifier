@@ -10,6 +10,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -122,6 +123,12 @@ private:
     void commit_selection(const SelectionConfig& sel);
     void open_picker();
     void on_topology_changed();
+    // (Re)creates the render service and its thread. One body for both the
+    // startup path and the topology-rebuild path, so the two cannot drift.
+    void start_render_thread();
+    // Called on the render thread when run() returns on its own rather than
+    // because of a stop request.
+    void handle_renderer_exit(RenderExitReason reason);
     void handle_capture_lost(std::uint32_t output_id);
     void handle_capture_recovered(std::uint32_t output_id);
     void save_config();
@@ -141,6 +148,9 @@ private:
     void restore_defaults();
     // Centres a region of the given size on the primary monitor.
     RectPx centre_on_primary(Px width, Px height) const;
+    // The dwell band as the current monitor sees it: the stored value is a
+    // 100 % feel constant, scaled here before it reaches the input thread.
+    int scaled_dwell_band() const;
     void load_config_or_defaults();
     // Copies the live controller state into the config mirror. Called whenever
     // a controller reports a change, so the settings window and the saved file
@@ -179,6 +189,10 @@ private:
     std::unique_ptr<InputThread> input_;
     std::unique_ptr<RenderService> render_;
     std::jthread render_thread_;
+    // When the last automatic restarts happened, so a device-removed storm
+    // cannot spin the rebuild path forever. Touched only by render threads,
+    // which are joined before the next one starts.
+    std::vector<std::chrono::steady_clock::time_point> renderer_restarts_;
 
     UINT_PTR pump_timer_{0};
     HWND pump_hwnd_{nullptr};
@@ -204,6 +218,11 @@ private:
     // Kept apart from notice_ so a capture message cannot overwrite a renderer
     // failure: losing that message would hide the reason the window is blank.
     std::string render_error_;
+    // Why the config file could not be loaded, when it could not. Apart from
+    // notice_ for the same reason: the hotkey-conflict notice that startup
+    // raises later would otherwise bury it, and the user would watch every
+    // setting revert with no explanation at all.
+    std::string config_load_error_;
     bool suspended_{false};
     // True when there was no configuration file, so the shipped defaults are in
     // force and the first-run placement rules apply.

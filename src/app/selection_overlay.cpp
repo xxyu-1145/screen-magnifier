@@ -264,12 +264,16 @@ void draw_handles(HDC dc, const RectPx& bounds, const RectPx& origin, HBRUSH fac
 // buttons. It exists because relying on the Enter key alone made confirming a
 // region depend on this window actually holding focus, which Windows is free to
 // refuse; a mouse target always works.
-void draw_hint_bar(HDC dc, SizePx client, RECT& bar_out, RECT& ok_out, RECT& cancel_out) noexcept {
+void draw_hint_bar(HDC dc, SizePx client, UINT dpi, RECT& bar_out, RECT& ok_out,
+                   RECT& cancel_out) noexcept {
     bar_out = RECT{};
     ok_out = RECT{};
     cancel_out = RECT{};
 
-    HFONT font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    // The bar used to draw in fixed 14 px, which shrank relative to everything
+    // else as the monitor's scale factor grew.
+    HFONT font = CreateFontW(-MulDiv(14, static_cast<int>(dpi), 96), 0, 0, 0, FW_NORMAL,
+                             FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                              DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
     const HGDIOBJ old_font = font ? SelectObject(dc, font) : nullptr;
@@ -347,7 +351,7 @@ void draw_hint_bar(HDC dc, SizePx client, RECT& bar_out, RECT& ok_out, RECT& can
 }
 
 void draw_readout(HDC dc, const SelectionConfig& sel, const RectPx& origin,
-                  SizePx client) noexcept {
+                  SizePx client, UINT dpi) noexcept {
     wchar_t text[96] = {};
     const int w = static_cast<int>(width_of(sel.bounds_px));
     const int h = static_cast<int>(height_of(sel.bounds_px));
@@ -356,7 +360,8 @@ void draw_readout(HDC dc, const SelectionConfig& sel, const RectPx& origin,
     const int len = static_cast<int>(std::wcslen(text));
     if (len <= 0) return;
 
-    HFONT font = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    HFONT font = CreateFontW(-MulDiv(14, static_cast<int>(dpi), 96), 0, 0, 0, FW_SEMIBOLD,
+                             FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     if (!font) return;
@@ -676,8 +681,9 @@ void SelectionOverlay::paint() {
     }
 
     update_loupe();
-    if (show) draw_readout(mem_dc_, draft_, origin, buffer_size_);
-    draw_hint_bar(mem_dc_, buffer_size_, hint_bar_, ok_button_, cancel_button_);
+    const UINT dpi = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
+    if (show) draw_readout(mem_dc_, draft_, origin, buffer_size_, dpi);
+    draw_hint_bar(mem_dc_, buffer_size_, dpi, hint_bar_, ok_button_, cancel_button_);
     fix_alpha(static_cast<std::uint32_t*>(mem_bits_), buffer_size_);
 
     BLENDFUNCTION blend{};
